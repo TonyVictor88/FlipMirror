@@ -1,0 +1,26 @@
+# Build outputs
+build/
+app/build/
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# Gradle
+.gradle/
+gradle-app.setting
+local.properties
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Termux scripts are kept (they are part of the setup guide)
+# but local test artifacts are not
+*.log
+_tmp/

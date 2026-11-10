@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FlipMirror 架构</title>
+<style>
+  :root{--bg:#0f1115;--panel:#171a21;--line:#272c36;--fg:#e6e8ee;--dim:#9aa3b2;--acc:#4ea1ff;--ok:#3ddc97;--warn:#ffb020;--bad:#ff5c5c}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.7 -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;padding:32px 20px 80px}
+  .wrap{max-width:1000px;margin:0 auto}
+  h1{font-size:26px;margin:0 0 6px}
+  .sub{color:var(--dim);margin-bottom:28px}
+  h2{font-size:17px;margin:34px 0 12px;padding-left:10px;border-left:3px solid var(--acc)}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--dim);font-weight:500}
+  code{background:#0b0d11;border:1px solid var(--line);border-radius:4px;padding:1px 5px;font-size:12px;color:#9ad1ff}
+  pre{background:#0b0d11;border:1px solid var(--line);border-radius:8px;padding:14px;overflow:auto;font-size:12px;color:#cfe3ff}
+  .tag{display:inline-block;font-size:11px;padding:1px 7px;border-radius:20px;margin-right:6px}
+  .t-ok{background:rgba(61,220,151,.14);color:var(--ok);border:1px solid rgba(61,220,151,.3)}
+  .t-warn{background:rgba(255,176,32,.14);color:var(--warn);border:1px solid rgba(255,176,32,.3)}
+  .t-bad{background:rgba(255,92,92,.14);color:var(--bad);border:1px solid rgba(255,92,92,.3)}
+  ul{margin:6px 0 0 18px;padding:0}li{margin:4px 0}
+  .muted{color:var(--dim)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>FlipMirror</h1>
+<div class="sub">把已拆除内屏的 Galaxy Z Flip5（SM-F731N）变成一台可用的外屏手机 —— 通过 MediaProjection 把 display 0 的画面投到外屏 display 1，并把外屏触摸反向注入回内屏。</div>
+
+<h2>一、架构图</h2>
+<div class="card">
+<pre>
+┌──────────────────────────── 外屏 display 1 (748×720) ────────────────────────────┐
+│  BarOverlayService  ── TYPE_APPLICATION_OVERLAY ──▶  ‹ ○ ▢ ✕   (右上角，常驻最上层) │
+│  ┌──────────────────────────────────────────────────────────────────────────┐  │
+│  │ MirrorActivity (Activity 窗口，落在外屏)                                   │  │
+│  │   ├─ 顶部 66px 黑带（状态栏位置，控件条浮在上面）                            │  │
+│  │   └─ SurfaceView  748×654 + 48px 圆角遮罩                                 │  │
+│  └──────────────────────────────────────────────────────────────────────────┘  │
+└────────────────────────────────────────────────────────────────────────────────┘
+         ▲ 显示                                      │ 触摸
+         │                                           ▼
+┌────────┴──────────────┐              ┌────────────────────────────────┐
+│ MirrorEngineImpl      │              │ TouchInjectorImpl              │
+│ MediaProjection       │              │  · 坐标映射 748×654 → 1600×1398 │
+│ createVirtualDisplay  │              │  · 优先 UserService（binder）   │
+│ AUTO_MIRROR display 0 │              │  · 兜底 input motionevent       │
+└────────▲──────────────┘              └───────────┬────────────────────┘
+         │ 采集                                      │ 注入
+┌────────┴──────────────────────────────────────────▼────────────────────┐
+│                        内屏 display 0  (1600×1398 @480)                  │
+│  wm size / wm density 由 Shell 预置；device_state = 4（双屏并发）          │
+└─────────────────────────────────────────────────────────────────────────┘
+
+        ┌────────────────────────────────────────────────┐
+        │ Shell（统一通道：root 优先 → Shizuku 兜底）       │
+        │  · am start --display 1（唯一可靠落屏方式）       │
+        │  · cmd device_state state 4 / wm size / density │
+        └────────────────────────────────────────────────┘
+
+        ┌────────────────────────────────────────────────┐
+        │ TouchUserService（继承 AIDL Stub，跑在 shell 进程）│
+        │  InputManager.injectInputEvent(ASYNC, display 0) │
+        └────────────────────────────────────────────────┘
+</pre>
+</div>
+
+<h2>二、文件清单</h2>
+<div class="card">
+<table>
+<tr><th>文件</th><th>职责</th><th>关键约束</th></tr>
+<tr><td><code>MainActivity.java</code></td><td>唯一入口：申请录屏授权 → 预置 device_state/分辨率 → shell 拉起镜像页</td><td>必须 <code>exported=true</code> + <code>launchMode=standard</code>，否则 shell 拉起被拒或复用旧实例</td></tr>
+<tr><td><code>MirrorActivity.java</code></td><td>镜像主界面：SurfaceView + 圆角 + 手势排除 + 触摸转发</td><td><code>wm size/density</code> 必须在拉起前设好，运行期间改会触发重建 → 落回 display 0</td></tr>
+<tr><td><code>MirrorEngineImpl.java</code></td><td>MediaProjection → createVirtualDisplay(AUTO_MIRROR)</td><td>同一 resultData 只能建一次，重复建抛 SecurityException</td></tr>
+<tr><td><code>MirrorService.java</code></td><td>前台服务，持有 mediaProjection 类型</td><td><code>stopWithTask=false</code></td></tr>
+<tr><td><code>BarOverlayService.java</code></td><td>右上角悬浮控件条 + 圆角遮罩</td><td>只在镜像运行时存在，退出即移除</td></tr>
+<tr><td><code>ControlBar.java</code></td><td>自绘四键 <code>‹ ○ ▢ ✕</code></td><td>图标统一 16×16 视觉盒</td></tr>
+<tr><td><code>TouchInjectorImpl.java</code></td><td>触摸注入：优先 UserService，兜底 shell 命令</td><td>必须实时发 DOWN/MOVE/UP；MOVE 40ms 节流</td></tr>
+<tr><td><code>TouchUserService.java</code></td><td>常驻 shell 进程里的注入端</td><td><b>必须继承 <code>ITouchUserService.Stub</code></b>，不能是 <code>Service</code></td></tr>
+<tr><td><code>ITouchUserService.aidl</code></td><td>注入接口</td><td><b>纯 ASCII</b>，中文注释会让 aidl.exe 失败</td></tr>
+<tr><td><code>Shell.java</code></td><td>统一 shell 通道</td><td>root 先试 6 个绝对路径；失败退 Shizuku；要求 exitCode==0 才算成功</td></tr>
+<tr><td><code>SettingsStore.java</code></td><td>参数：内屏 W/H/DPI、圆角半径、DPI 滑块</td><td>默认 1600×1398 @480</td></tr>
+<tr><td><code>WatchdogService.java</code></td><td>独立进程 <code>:wd</code> 守护（异常退出后重新拉起）</td><td><code>--ez auto_start true</code> 免点击</td></tr>
+<tr><td><code>install.sh</code></td><td>装包 + 授权 appops + 复查</td><td><b>不碰用户系统偏好</b>（导航方式等）</td></tr>
+<tr><td><code>flip-boot.bat</code></td><td>开机后一键起 Shizuku + 拉镜像</td><td>纯 ASCII</td></tr>
+</table>
+</div>
+
+<h2>三、数据契约</h2>
+<div class="card">
+<table>
+<tr><th>键 / 值</th><th>含义</th><th>默认</th></tr>
+<tr><td><code>innerWidth / innerHeight</code></td><td>内屏被压缩后的像素尺寸（必须保持 748:654 ≈ 1.144 的比例）</td><td>1600 / 1398</td></tr>
+<tr><td><code>innerDpi</code></td><td>内屏密度。dp = px ÷ (dpi/160)；调小 → 一屏显示更多</td><td>480</td></tr>
+<tr><td><code>cornerRadius</code></td><td>圆角半径（基准 748 宽，实际按比例缩放）</td><td>48</td></tr>
+<tr><td><code>device_state</code></td><td>镜像期间必须为 <code>4</code>（CONCURRENT_INNER_DEFAULT）；退出改回 <code>1</code></td><td>退出 1</td></tr>
+<tr><td>几何常量</td><td>顶带 66px、内容区 748×654、圆角遮罩 0.064×宽</td><td>—</td></tr>
+<tr><td>触摸坐标系</td><td>SurfaceView 坐标 → ×(innerW/srcW) → display 0 坐标</td><td>—</td></tr>
+<tr><td>标记文件</td><td><code>files/mirror_active.flag</code> 存在 = 应该有镜像（看门狗据此判断）</td><td>—</td></tr>
+</table>
+</div>
+
+<h2>四、怎么跑</h2>
+<div class="card">
+<pre>
+# 1) 开机后跑一次（起 Shizuku 服务端）
+adb shell /data/local/tmp/shizuku_starter
+#    或者双击项目根目录的 flip-boot.bat
+
+# 2) 装包
+bash install.sh
+
+# 3) 启动
+adb shell am start --display 1 -n com.flip.mirror/.MainActivity
+#    点「开始镜像到外屏」
+
+# 4) 退出：点右上角 ✕  → 回外屏首页，device_state 自动回 1
+
+# 排障
+adb shell ps -A | grep shizuku_server          # 0 = 服务端掉了，重跑第 1 步
+adb logcat -s FlipMirror:V FlipTouchSvc:V      # 应用日志（务必用 -s TAG 过滤）
+</pre>
+</div>
+
+<h2>五、当前边界</h2>
+<div class="card">
+<ul>
+<li><span class="tag t-ok">可用</span> 投屏画面 / 圆角 / 悬浮控件条 / 触摸注入（UserService，零 fork）/ 无缝退出 / DPI 可调</li>
+<li><span class="tag t-warn">限制</span> <b>开机必须跑一次 <code>flip-boot.bat</code></b> —— 这台没有免 root 的 Shizuku 自启通道（实测 <code>ro.boot.flash.locked=1</code>、KernelSU 守护开机不启动）</li>
+<li><span class="tag t-warn">限制</span> Shizuku 服务端会被杀；掉了之后触摸退回慢通道（每个事件 fork 一个 <code>input</code>）</li>
+<li><span class="tag t-warn">限制</span> 通知栏/下拉菜单受外屏宽高比（1.144）限制，无法完整展示，只能靠降 DPI 缓解</li>
+<li><span class="tag t-bad">不可行</span> LSPosed + FlexUnlock（要 One UI 8.5 + 真解锁；本机 8.0 且引导锁死）</li>
+<li><span class="tag t-bad">不做</span> 音频不投（单套扬声器会双重播放）；震动无法投（硬件马达）</li>
+</ul>
+</div>
+
+<h2>六、变更记录</h2>
+<div class="card">
+<table>
+<tr><th>日期</th><th>改动</th></tr>
+<tr><td>2026-11-10</td><td>初始可用版本：投屏 + 圆角 + 控件条 + 触摸注入</td></tr>
+<tr><td>2026-11-10</td><td>落屏问题根治：<code>exported=true</code> + <code>launchMode=standard</code> + shell <code>am start --display 1</code></td></tr>
+<tr><td>2026-11-10</td><td>修 <code>wm size/density</code> 时序：必须在拉起镜像页之前设好，否则 Activity 重建落回 display 0</td></tr>
+<tr><td>2026-11-10</td><td>控件条搬到右上角悬浮层；最后一个键改为 ✕ 退出</td></tr>
+<tr><td>2026-11-10</td><td>DPI 改为滑块（240~480）；分辨率等比放大到 1600×1398 @480</td></tr>
+<tr><td>2026-11-10</td><td><b>触摸跟手根治</b>：MOVE 事件原本被丢弃 → 实时 DOWN/MOVE/UP；再引入 Shizuku UserService + <code>injectInputEvent</code> 消除进程 fork</td></tr>
+</table>
+</div>
+
+</div>
+</body>
+</html>

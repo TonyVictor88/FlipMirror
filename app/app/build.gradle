@@ -1,0 +1,42 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    buildFeatures {
+        aidl true
+    }
+    namespace 'com.flip.mirror'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.flip.mirror"
+        minSdk 34
+        targetSdk 34
+        versionCode 1
+        versionName "0.1.0"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    // 强制指定目标外屏所在 display
+    lintOptions {
+        abortOnError false
+    }
+}
+
+dependencies {
+    // Shizuku：App 侧通过它拿到 shell 权限执行 input 命令（KernelSU 的 su 对 App 不可见）
+    implementation 'dev.rikka.shizuku:api:13.1.5'
+    implementation 'dev.rikka.shizuku:provider:13.1.5'
+}

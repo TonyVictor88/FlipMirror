@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  ⚠️ 千万不要开 flagRequestTouchExplorationMode / canRequestTouchExplorationMode。
+     开了之后 dumpsys accessibility 里 touchExplorationEnabled=true，
+     全屏点击会变成"先选中、再双击才触发"，用户会以为触控坏了（2026-11-10 踩过）。
+     本服务只需要吃掉边缘手势，不需要触摸探索。
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagDefault"
+    android:canRequestTouchExplorationMode="false"
+    android:canRetrieveWindowContent="false"
+    android:description="@string/acc_desc"
+    android:notificationTimeout="100" />

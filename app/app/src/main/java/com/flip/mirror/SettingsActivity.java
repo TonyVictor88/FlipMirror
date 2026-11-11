@@ -74,7 +74,7 @@ public class SettingsActivity extends Activity {
         TextView title = new TextView(this);
         title.setText("FlipMirror 设置");
         title.setTextColor(TEXT_MAIN);
-        title.setTextSize(17);
+        title.setTextSize(20);
         title.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         bar.addView(title);
 
@@ -198,15 +198,15 @@ public class SettingsActivity extends Activity {
         TextView st = new TextView(this);
         st.setText(sectionTitle);
         st.setTextColor(TEXT_SUB);
-        st.setTextSize(13);
-        st.setPadding(Math.round(20 * d), Math.round(18 * d), 0, Math.round(8 * d));
+        st.setTextSize(12);
+        st.setPadding(Math.round(24 * d), Math.round(22 * d), 0, Math.round(10 * d));
         content.addView(st);
 
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
         GradientDrawable bg = new GradientDrawable();
         bg.setColor(CARD);
-        bg.setCornerRadius(20 * d);
+        bg.setCornerRadius(28 * d);
         card.setBackground(bg);
 
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
@@ -235,7 +235,7 @@ public class SettingsActivity extends Activity {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(Math.round(16 * d), Math.round(10 * d), Math.round(16 * d), Math.round(10 * d));
+        row.setPadding(Math.round(20 * d), Math.round(15 * d), Math.round(20 * d), Math.round(15 * d));
 
         LinearLayout left = new LinearLayout(this);
         left.setOrientation(LinearLayout.VERTICAL);
@@ -244,7 +244,7 @@ public class SettingsActivity extends Activity {
         TextView t = new TextView(this);
         t.setText(title);
         t.setTextColor(TEXT_MAIN);
-        t.setTextSize(15);
+        t.setTextSize(16);
         left.addView(t);
 
         if (sub != null && !sub.isEmpty()) {
@@ -271,8 +271,8 @@ public class SettingsActivity extends Activity {
         // 截图实测完全看不见（等于没做开关）。
         // 改成自绘开关：固定像素宽高 + 纯文字「开/关」，不依赖任何主题度量。
         final TextView sw = new TextView(this);
-        final int w = Math.round(56 * density);
-        final int h = Math.round(32 * density);
+        final int w = Math.round(60 * density);
+        final int h = Math.round(36 * density);
         sw.setLayoutParams(new LinearLayout.LayoutParams(w, h));
         sw.setGravity(android.view.Gravity.CENTER);
         sw.setTextSize(13);
@@ -282,7 +282,7 @@ public class SettingsActivity extends Activity {
             sw.setText(on ? "开" : "关");
             android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
             bg.setCornerRadius(16 * density);
-            bg.setColor(on ? 0xFF2FA84F : 0xFF4A4F57);
+            bg.setColor(on ? 0xFF57C77E : 0xFF3A4149);
             sw.setBackground(bg);
         };
         paint.run();

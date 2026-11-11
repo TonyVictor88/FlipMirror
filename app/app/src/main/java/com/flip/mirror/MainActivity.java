@@ -543,34 +543,74 @@ public class MainActivity extends Activity {
      * Termux 的 targetSdk=28 不受此限，且它已经有授权过的 adb 自连通道
      * （127.0.0.1:5555，adb_keys 跨重启保留）。</p>
      */
+    /**
+     * 自检：全部在 App 内完成，不再经过 Termux。
+     *
+     * 以前是发 Intent 让 Termux 跑 flip-prep.sh —— Termux 重启后 RunCommand 链路
+     * 经常断（脚本/权限/服务任何一个没就绪都静默失败），自检永远"失败"。
+     * 现在直接在本进程用 Shizuku（Shell）做检查，判据只有三条：
+     *   ① Shizuku binder 可用且已授权
+     *   ② 外屏(display 1)存在
+     *   ③ 双屏并发已置上（cmd device_state state 4）
+     */
     private void runSelfCheck() {
-        if (mStatus != null) mStatus.setText("自检中…（约 10 秒）");
-        try {
-            android.content.Intent i = new android.content.Intent();
-            i.setClassName("com.termux", "com.termux.app.RunCommandService");
-            i.setAction("com.termux.RUN_COMMAND");
-            i.putExtra("com.termux.RUN_COMMAND_PATH",
-                    "/data/data/com.termux/files/usr/bin/sh");
-            i.putExtra("com.termux.RUN_COMMAND_ARGUMENTS",
-                    new String[]{"/data/data/com.termux/files/home/flip-prep.sh"});
-            i.putExtra("com.termux.RUN_COMMAND_WORKDIR",
-                    "/data/data/com.termux/files/home");
-            i.putExtra("com.termux.RUN_COMMAND_BACKGROUND", true);
-            if (android.os.Build.VERSION.SDK_INT >= 26) {
-                startForegroundService(i);
-            } else {
-                startService(i);
-            }
-            android.util.Log.i("FlipMirror", "self-check intent sent");
-            new android.os.Handler(getMainLooper()).postDelayed(() -> {
-                if (mStatus != null) {
-                    mStatus.setText("自检已下发。若 10 秒后仍异常，请打开 Termux 看 "
-                            + "flip-prep.log");
-                }
-            }, 10000);
-        } catch (Throwable t) {
-            android.util.Log.e("FlipMirror", "self-check failed", t);
-            if (mStatus != null) mStatus.setText("自检失败：" + t.getMessage());
+        if (mStatus != null) {
+            mStatus.setText("自检中…");
         }
+        new Thread(() -> {
+            StringBuilder sb = new StringBuilder();
+            boolean allOk = true;
+
+            // ① Shizuku
+            boolean binder = false;
+            int perm = -1;
+            try {
+                binder = rikka.shizuku.Shizuku.pingBinder();
+                if (binder) {
+                    perm = rikka.shizuku.Shizuku.checkSelfPermission();
+                }
+            } catch (Throwable ignored) { }
+            boolean shizukuOk = binder && perm == 0;   // 0 = PERMISSION_GRANTED
+            allOk &= shizukuOk;
+            sb.append(shizukuOk ? "✅ Shizuku 已授权" : "❌ Shizuku 未就绪/未授权");
+
+            // ② 外屏存在
+            boolean coverOk = false;
+            try {
+                android.hardware.display.DisplayManager dm =
+                        (android.hardware.display.DisplayManager) getSystemService(DISPLAY_SERVICE);
+                android.view.Display d1 = dm == null ? null : dm.getDisplay(1);
+                coverOk = d1 != null
+                        && d1.getState() != android.view.Display.STATE_OFF;
+            } catch (Throwable ignored) { }
+            allOk &= coverOk;
+            sb.append("\n").append(coverOk ? "✅ 外屏在线" : "❌ 外屏未就绪");
+
+            // ③ 双屏并发 + 内屏尺寸
+            boolean dualOk = false;
+            if (shizukuOk) {
+                try {
+                    dualOk = Shell.execSync("cmd device_state state 4");
+                } catch (Throwable ignored) { }
+                try {
+                    SettingsStore st = new SettingsStore(this);
+                    Shell.execSync("wm size " + st.innerWidth() + "x" + st.innerHeight());
+                    Shell.execSync("wm density " + st.innerDpi());
+                } catch (Throwable ignored) { }
+            }
+            allOk &= dualOk;
+            sb.append("\n").append(dualOk ? "✅ 双屏已开启" : "❌ 双屏开启失败");
+
+            sb.append(allOk ? "\n\n自检通过，可以开始镜像。" : "\n\n有问题项，见上。");
+            final boolean ok = allOk;
+            final String msg = sb.toString();
+            Log.i(TAG, "self-check " + (ok ? "PASS" : "FAIL") + " | "
+                    + msg.replace("\n", " / "));
+            runOnUiThread(() -> {
+                if (mStatus != null) {
+                    mStatus.setText(msg);
+                }
+            });
+        }, "self-check").start();
     }
 }

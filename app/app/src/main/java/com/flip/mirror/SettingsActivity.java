@@ -266,6 +266,9 @@ public class SettingsActivity extends Activity {
         sw.setChecked(store.getBool(key, def));
         sw.setOnCheckedChangeListener((b, checked) -> store.setBool(key, checked));
         row.addView(sw);
+        // 整行可点：之前只有那个小开关能点，点文字没反应（用户反馈"一堆设置点不了"）
+        row.setClickable(true);
+        row.setOnClickListener(v -> sw.setChecked(!sw.isChecked()));
     }
 
     private void addSlider(LinearLayout card, final String key, String title, String sub,

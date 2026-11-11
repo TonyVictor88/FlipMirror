@@ -13,8 +13,8 @@ android {
         applicationId "com.flip.mirror"
         minSdk 34
         targetSdk 34
-        versionCode 72
-        versionName "1.5.9"
+        versionCode 73
+        versionName "1.6.0"
     }
 
     buildTypes {

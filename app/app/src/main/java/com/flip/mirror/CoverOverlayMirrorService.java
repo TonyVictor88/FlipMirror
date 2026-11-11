@@ -473,6 +473,11 @@ public class CoverOverlayMirrorService extends Service {
             if (mView != null) {
                 mView.setFlipTouch(flip);
             }
+            // 控件条：位置不动，但**方向和顺序一起倒**（用户要求"四个键方向得跟着倒转"）。
+            // 只转这条，不转根容器，所以它仍停在右上角原位。
+            if (mBar != null) {
+                mBar.setRotation(flip ? 180f : 0f);
+            }
             Log.i(TAG, "flip180 = " + flip);
         } catch (Throwable t) {
             Log.w(TAG, "applyFlip failed: " + t);

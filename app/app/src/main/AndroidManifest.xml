@@ -156,5 +156,17 @@
             </intent-filter>
         </receiver>
 
+        <!-- 事件驱动看门狗：亮屏/解锁/开机 立刻响应（静态注册，进程死了也能收到） -->
+        <receiver
+            android:name=".WakeWatcher"
+            android:exported="true"
+            android:enabled="true">
+            <intent-filter>
+                <action android:name="android.intent.action.SCREEN_ON" />
+                <action android:name="android.intent.action.USER_PRESENT" />
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
     </application>
 </manifest>

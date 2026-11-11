@@ -30,7 +30,7 @@ import android.util.Log;
 public class KeepAliveReceiver extends BroadcastReceiver {
 
     private static final String TAG = "FlipKeepAlive";
-    private static final long INTERVAL_MS = 15_000L;
+    private static final long INTERVAL_MS = 30_000L;   // 事件驱动为主，这里只是兜底
     private static final int REQ = 0x5F10;
 
     /** 「用户期望正在投屏」标记：服务启动写 true，点 ✕ 退出写 false。 */
@@ -64,7 +64,7 @@ public class KeepAliveReceiver extends BroadcastReceiver {
         }
     }
 
-    private boolean isServiceAlive(Context ctx) {
+    static boolean isServiceAlive(Context ctx) {
         try {
             android.app.ActivityManager am =
                     (android.app.ActivityManager) ctx.getSystemService(Context.ACTIVITY_SERVICE);

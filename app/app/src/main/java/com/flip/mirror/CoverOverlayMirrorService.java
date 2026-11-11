@@ -764,8 +764,17 @@ public class CoverOverlayMirrorService extends Service {
                 // 用户按电源时由系统重新拉起 SubHome —— 早上就是这样工作的。
                 // 用户的长按电源绑在阿田的 PowerAssistActivity 上，那个能正确把外屏首页拉回来。
                 // ✕ 直接复用它 —— 与其自己猜怎么恢复 SubHome，不如走用户已经验证过的那条路。
+                // 不再回 state 1：一退回单屏，外屏被系统收掉，下次点图标又难落屏。
+                // 保持双屏并发，只让阿田把外屏首页拉回来 —— 实测这条能立刻回首页，
+                // 而且下次点图标能正常进（0.9.3 验证过的那条路）。
+                // 矩阵里唯一没试过的组合：先退回单屏 + 阿田拉回首页（首页能正确渲染），
+                // 然后立刻恢复双屏 —— 这样首页留着，display 1 也在，
+                // 下次点图标既能落到外屏、又有栈顶可依。
+                // 结论（今天验证到底）：外屏首页 SubHome **只在单屏模式(state 1)下存在**。
+                // 一旦回到双屏并发(state 4)，外屏就是块"空地"，只有壁纸。
+                // 所以退出只能停在 state 1 —— 首页正常；要再投屏时由入口页重新置 4。
                 boolean ok = Shell.execSync(
-                        "cmd device_state state 1; sleep 0.3; "
+                        "cmd device_state state 1; sleep 0.4; "
                         + "am start --display 1 -n com.tianweixing.atianwidget/.PowerAssistActivity");
                 Log.i(TAG, "hide: home on cover -> " + ok);
             }, "hide-home").start();

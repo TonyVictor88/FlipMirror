@@ -83,11 +83,22 @@ public class MainActivity extends Activity {
                 return;
             }
             Shell.execSync("cmd device_state state 4");
+            // 退出时我们把外屏收掉了(state 1)。再次点图标时，display 1 要等系统重新点亮
+            // 才存在，不等就 am start --display 1 会落到空处 → 外屏仍是壁纸（实测）。
+            try {
+                Thread.sleep(2000);
+            } catch (InterruptedException ignored) { }
             // 关键：如果本实例落在内屏(0)，外屏根本看不到入口页（只有壁纸）。
             // 显式把自己复制一份到 display 1，然后结束本实例。
             int disp = getDisplay() != null ? getDisplay().getDisplayId() : -1;
             Log.i(TAG, "entry on display " + disp);
             if (disp != 1) {
+                // 先把外屏首页恢复出来（与退出路径同一招），否则外屏上没有可用的
+                // "栈顶"，我们的 Activity 落上去也画不出来（实测只剩壁纸）。
+                Shell.execSync("am start --display 1 -n com.tianweixing.atianwidget/.PowerAssistActivity");
+                try {
+                    Thread.sleep(1200);
+                } catch (InterruptedException ignored) { }
                 boolean ok = Shell.execSync(
                         "am start --display 1 -f 0x18000000 -n com.flip.mirror/.MainActivity");
                 Log.i(TAG, "entry: relaunch on display 1 -> " + ok);

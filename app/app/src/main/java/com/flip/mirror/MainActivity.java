@@ -75,6 +75,16 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // 幂等：镜像已经在跑时，再点「FlipMirror」图标应当什么都不做。
+        // 之前会打开入口页并把正在运行的悬浮层顶掉（实测窗口 1->2，外屏只剩壁纸）。
+        // 只有带 auto_start（看门狗/亮屏恢复）时才继续走流程。
+        if (CoverOverlayMirrorService.isRunning()
+                && (getIntent() == null
+                    || !getIntent().getBooleanExtra("auto_start", false))) {
+            Log.i(TAG, "already mirroring, ignore FlipMirror launch");
+            finish();
+            return;
+        }
         ensureShizukuPermission();
 
         float d = getResources().getDisplayMetrics().density;

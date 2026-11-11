@@ -650,9 +650,14 @@ public class CoverOverlayMirrorService extends Service {
             //    投屏是按内屏真实像素来的，比例不一致时怎么缩放都填不满。
             if (Shell.available()) {
                 SettingsStore st = new SettingsStore(this);
+                // 自愈：设置里的内屏尺寸/DPI 若是异常值（改动后残留、或误设），
+                // 会直接把投屏分辨率带偏（实测抓到 480x462 就是这类）。
+                int iw = st.innerWidth(), ih = st.innerHeight(), idpi = st.innerDpi();
+                if (iw < 1200 || ih < 1000) { iw = 1600; ih = 1398; }
+                if (idpi < 400) { idpi = 480; }
+                Log.i(TAG, "prep size " + iw + "x" + ih + " @" + idpi);
                 String prep = "cmd device_state state 4; sleep 0.8; wm size "
-                        + st.innerWidth() + "x" + st.innerHeight()
-                        + "; wm density " + st.innerDpi();
+                        + iw + "x" + ih + "; wm density " + idpi;
                 boolean ok = Shell.execSync(prep);
                 Log.i(TAG, "prepare inner display -> " + ok);
                 try {

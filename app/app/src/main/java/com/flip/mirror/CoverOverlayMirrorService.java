@@ -393,6 +393,13 @@ public class CoverOverlayMirrorService extends Service {
     /* ------------------------------------------------------------ 悬浮层 */
 
     private void showOverlay() {
+        // 重入锁：已经在显示就直接返回。
+        // 启动阶段这个方法会被调用多次（服务被创建多次 / 恢复路径），
+        // 每次重建都会让屏幕闪一下（实测：窗口数 1→2，中间露黑底 3.8KB 帧）。
+        if (mRoot != null && mRoot.isAttachedToWindow()) {
+            Log.i(TAG, "overlay already shown, skip rebuild");
+            return;
+        }
         try {
             DisplayManager dm = (DisplayManager) getSystemService(DISPLAY_SERVICE);
             Display d1 = dm == null ? null : dm.getDisplay(1);
@@ -778,7 +785,10 @@ public class CoverOverlayMirrorService extends Service {
         private boolean mShowTrCorner = true;
         private long mCornerReadAt = 0;
 
-        private final TouchInjector mTouch = new TouchInjectorImpl();
+        /** 触摸注入器全进程共享一份：每次建层都 new 一个会重复连 Shizuku UserService
+         *  （实测一次启动连了 5 次），既慢又浪费。 */
+        private static TouchInjector sTouch;
+        private TouchInjector mTouch;
 
         MirrorCanvasView(Context c) {
             super(c);
@@ -788,6 +798,10 @@ public class CoverOverlayMirrorService extends Service {
             mHintText.setTextSize(26f);
             mHintText.setAntiAlias(true);
             mBlack.setStyle(Paint.Style.FILL);
+            if (sTouch == null) {
+                sTouch = new TouchInjectorImpl();
+            }
+            mTouch = sTouch;
             mTouch.init();
             // 本视图已经把手势坐标换算成"内屏像素坐标"，这里让注入器做恒等映射，
             // 避免再乘一次比例（双重换算 → 点击位置整体偏掉）

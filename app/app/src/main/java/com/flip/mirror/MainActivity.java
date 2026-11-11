@@ -180,6 +180,7 @@ public class MainActivity extends Activity {
         //    （自己设置双屏并发 + 拉起 Shizuku）。App 本身 targetSdk 34 无法执行
         //    私有目录里的二进制（noexec），所以借 Termux（targetSdk 28）的手。
         Button selfCheck = new Button(this);
+        styleFlat(selfCheck, 0xFF26303A);
         selfCheck.setText("① 启动前自检（双屏 + Shizuku）");
         selfCheck.setLayoutParams(new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
@@ -188,6 +189,7 @@ public class MainActivity extends Activity {
         root.addView(selfCheck);
 
         Button go = new Button(this);
+        styleFlat(go, 0xFF3D7DFF);
         go.setText("开始镜像到外屏");
         go.setTextSize(20);
         go.setAllCaps(false);
@@ -199,6 +201,7 @@ public class MainActivity extends Activity {
         root.addView(go);
 
         Button settings = new Button(this);
+        styleFlat(settings, 0xFF26303A);
         settings.setText("设置");
         settings.setAllCaps(false);
         settings.setLayoutParams(new LinearLayout.LayoutParams(
@@ -334,6 +337,20 @@ public class MainActivity extends Activity {
             }
         } catch (Throwable ignored) { }
         requestProjection();
+    }
+
+    /** 平面圆角按钮（替代系统默认的胶囊带渐变样式）。 */
+    private void styleFlat(android.widget.Button b, int color) {
+        android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
+        bg.setCornerRadius(16 * getResources().getDisplayMetrics().density);
+        bg.setColor(color);
+        b.setBackground(bg);
+        b.setAllCaps(false);
+        b.setTextColor(0xFFFFFFFF);
+        b.setTextSize(16);
+        b.setMinHeight(Math.round(52 * getResources().getDisplayMetrics().density));
+        b.setGravity(android.view.Gravity.CENTER);
+        b.setElevation(0);
     }
 
     private void requestProjection() {

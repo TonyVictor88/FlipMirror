@@ -420,6 +420,9 @@ public class SettingsActivity extends Activity {
             track.setColor(0xFF2B323B);
             prog.setColor(0xFFA8C7FA);
             thumb.setColor(0xFFE8EDF3);
+            // 没有 drawable 时 SeekBar 量得高度为 0 → 整条滑杆消失。
+            // 显式给个头，保证能画出来。
+            setMinimumHeight(Math.round(28 * density));
             setSplitTrack(false);
             setBackground(null);
             if (android.os.Build.VERSION.SDK_INT >= 16) {

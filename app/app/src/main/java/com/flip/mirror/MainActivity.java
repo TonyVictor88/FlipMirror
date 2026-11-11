@@ -460,6 +460,19 @@ public class MainActivity extends Activity {
                         .putBoolean(K_PENDING_START, true).apply();
                 Shell.execSync("cmd device_state state 4");
                 Log.i(TAG, "start: switch to dual screen, will request after recreate");
+                // 如果本来就在双屏，不会触发配置变更 → 也就不会有重建来回接。
+                // 这里给个兜底：1.5 秒后若 pending 还挂着（说明没重建），自己发起申请。
+                getWindow().getDecorView().postDelayed(() -> {
+                    try {
+                        if (getSharedPreferences(PREFS_UI, MODE_PRIVATE)
+                                .getBoolean(K_PENDING_START, false)) {
+                            getSharedPreferences(PREFS_UI, MODE_PRIVATE).edit()
+                                    .putBoolean(K_PENDING_START, false).apply();
+                            Log.i(TAG, "start: no recreate, request now");
+                            requestProjection();
+                        }
+                    } catch (Throwable ignored) { }
+                }, 1500);
                 return;
             }
         } catch (Throwable ignored) { }

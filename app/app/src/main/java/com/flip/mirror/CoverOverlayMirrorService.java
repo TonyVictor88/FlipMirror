@@ -110,6 +110,19 @@ public class CoverOverlayMirrorService extends Service {
     private volatile boolean mShuttingDown = false;
 
     /**
+     * 服务是否已经在跑。
+     *
+     * 用户会从**镜像画面里**的桌面再点一次「投屏到外屏」图标（那个图标在镜像里看得见），
+     * 结果起了第二份服务 → 两个全屏悬浮窗叠在一起，画面直接花掉（实测窗口 1→2）。
+     * 所以入口必须先问一句：已经在跑就别再起。
+     */
+    private static volatile boolean sRunning = false;
+
+    public static boolean isRunning() {
+        return sRunning;
+    }
+
+    /**
      * 关屏保活用的唤醒锁。
      *
      * 抄的是阿田的做法（反编译它的 APK 看到 {@code Atian:ExternalDisplayWakeLock}）：
@@ -134,6 +147,8 @@ public class CoverOverlayMirrorService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
+        sRunning = true;
+        mShuttingDown = false;
         startForegroundWithNotification();
         acquireWakeLock();
         showOverlay();
@@ -692,6 +707,7 @@ public class CoverOverlayMirrorService extends Service {
         } catch (Throwable ignored) { }
         mWakeLock = null;
         mProjectionAlive = false;
+        sRunning = false;
         sResultCode = 0;
         sResultData = null;
         super.onDestroy();

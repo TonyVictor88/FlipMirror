@@ -26,6 +26,12 @@ public class QuickMirrorActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // 幂等：镜像已经在跑就别再起一份（用户会从镜像画面里点这个图标）
+        if (CoverOverlayMirrorService.isRunning()) {
+            Log.i(TAG, "already mirroring, ignore this launch");
+            finish();
+            return;
+        }
         Log.i(TAG, "QuickMirrorActivity: launching mirror on display 0");
 
         final String cmd = "am start --display 0 -f 0x18000000 -n com.flip.mirror/.MainActivity"

@@ -115,6 +115,9 @@ public class CoverOverlayMirrorService extends Service {
     /** ✕ 二次确认：第一次点的时间戳。 */
     private volatile long mExitArmedAt = 0;
 
+    /** 悬浮层当前处于"隐藏"状态（窗口还在，只是不可见/不可触）。 */
+    private volatile boolean mHidden = false;
+
     /**
      * 服务是否已经在跑。
      *
@@ -184,7 +187,7 @@ public class CoverOverlayMirrorService extends Service {
         startForegroundWithNotification();
         acquireWakeLock();
         showOverlay();
-        startBarWatchdog();
+        startBarWatchdogOnce();
         registerScreenOnRecovery();
     }
 
@@ -293,6 +296,13 @@ public class CoverOverlayMirrorService extends Service {
      * 自愈：每 3 秒确认控件条窗口还在，掉了就补。
      * 用户要求"写死再也不要动" —— 那就不靠任何一次性初始化，掉了自动回来。
      */
+    private void startBarWatchdogOnce() {
+        if (mBarWatchdog != null) {
+            return;   // 已经在跑，不重复起
+        }
+        startBarWatchdog();
+    }
+
     private void startBarWatchdog() {
         mBarWatchdog = new Handler(getMainLooper());
         mBarWatchdog.postDelayed(new Runnable() {
@@ -407,6 +417,14 @@ public class CoverOverlayMirrorService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        // 已经在跑（退出后隐藏着）：直接显示回来，不重建窗口、不重新申请录屏
+        if (mRoot != null && sRunning) {
+            showAgain();
+            if (!mProjectionAlive) {
+                startProjection();
+            }
+            return START_STICKY;
+        }
         if (sUserExited) {
             Log.i(TAG, "user exited earlier, stay stopped");
             stopSelf();
@@ -695,58 +713,64 @@ public class CoverOverlayMirrorService extends Service {
         } catch (Throwable ignored) { }
     }
 
+    /** 把已存在的悬浮层重新显示出来（退出后再进入走这条，不重建窗口）。 */
+    private void showAgain() {
+        mHidden = false;
+        try {
+            if (mRoot != null && mWm != null) {
+                mRoot.setAlpha(1f);
+                mWmParams.flags &= ~WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
+                mWm.updateViewLayout(mRoot, mWmParams);
+                Log.i(TAG, "mirror shown again (reused window)");
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "showAgain failed: " + t);
+        }
+        try {
+            MirrorState.setDesired(this, true);
+            KeepAliveReceiver.schedule(this);
+        } catch (Throwable ignored) { }
+        startBarWatchdogOnce();
+    }
+
     private void shutdown() {
-        // 🔴 先停看门狗再拆视图：否则 3 秒后它发现控件条没了，会立刻补回来 ——
-        //    表现就是"点了退出、回到外屏首页，但控件条还挂在上面"（实测踩过）。
-        mShuttingDown = true;
-        sUserExited = true;
+        // 🔴 退出 = **隐藏**，不是拆除。
+        // 拆除全屏悬浮层时，系统会把 SubHome 从绘制列表里摘掉；
+        // 之后再请回来它是"resumed 但不绘制"，外屏永远停在壁纸（今天试了三种办法都不行）。
+        // 隐藏则不碰窗口栈，SubHome 一直在下面活着，立刻可见。
+        mHidden = true;
+        sUserExited = false;          // 允许下次直接再显示
         try {
             MirrorState.setDesired(this, false);
             KeepAliveReceiver.cancel(this);
         } catch (Throwable ignored) { }
-        try {
-            if (mBarWatchdog != null) {
-                mBarWatchdog.removeCallbacksAndMessages(null);
-            }
-        } catch (Throwable ignored) { }
-        try {
-            if (mBar != null && mRoot != null) {
-                mRoot.removeView(mBar);
-            }
-        } catch (Throwable ignored) { }
+
         try {
             if (mRoot != null && mWm != null) {
-                mWm.removeView(mRoot);
-                mRoot = null;
+                mRoot.setAlpha(0f);
+                mWmParams.flags |= WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
+                mWm.updateViewLayout(mRoot, mWmParams);
             }
-        } catch (Throwable ignored) { }
-
-        // 🔴 退出必须把双屏状态还回去：
-        //    之前只移除悬浮层、不还 device_state，外屏就停在 CONCURRENT(4) 且没有任何内容 ——
-        //    表现就是"点退出回不到外屏首页"（黑屏/悬空）。
-        new Thread(() -> {
-            try {
-                // ⚠️ 只还双屏状态，**不 reset 分辨率**：
-                //    一 reset，内屏回到 1080x1920，桌面要重排，经常变成空白页 ——
-                //    用户再点进来看到的就是纯壁纸（实测）。
-                //    保持 1600x1398 反而稳定：反正内屏看不见。
-                // 只拆悬浮层不够：d1 上没有任何 Activity 在画，画面就停在壁纸。
-                // 必须把外屏首页（SubHome）请回来 —— 发一次 display 1 的 HOME 键即可。
-                // 发 HOME 只是让 SubHome 回来，但它常出现"resumed 但不绘制"（只剩壁纸）。
-                // 显式把 SubHomeActivity 起一次，强制它重建窗口。
-                // 只发 HOME / 只起 SubHome 都不行：它会"resumed 但不绘制"，外屏停在壁纸。
-                // 可靠做法是让三星自己重建外屏：先退回单屏(state 1)再立刻恢复并发(state 4)，
-                // 系统会把 SubHome 重新摆上去并完整绘制。
+        } catch (Throwable t) {
+            Log.w(TAG, "hide failed: " + t);
+        }
+        // 不 stopSelf、不 removeView —— 服务与窗口都留着，下次秒回
+        // 隐藏后还要催一次 SubHome：它被全屏层盖住期间会停止绘制，
+        // 只把层藏起来它不会自己重画（实测露出来还是壁纸）。发 HOME 让它恢复。
+        try {
+            new Thread(() -> {
+                // 实测：只隐藏、只发 HOME 都恢复不了 SubHome（它被全屏层盖过后不再绘制）。
+                // 唯一验证过的组合是"退回单屏(state 1)让系统自己收掉外屏"，
+                // 用户按电源时由系统重新拉起 SubHome —— 早上就是这样工作的。
+                // 用户的长按电源绑在阿田的 PowerAssistActivity 上，那个能正确把外屏首页拉回来。
+                // ✕ 直接复用它 —— 与其自己猜怎么恢复 SubHome，不如走用户已经验证过的那条路。
                 boolean ok = Shell.execSync(
-                        "cmd device_state state 1; sleep 0.6; cmd device_state state 4");
-                android.util.Log.i(TAG, "exit: back to cover home -> " + ok);
-                Log.i(TAG, "exit: restore device_state 1 + wm reset -> " + ok);
-            } catch (Throwable t) {
-                Log.w(TAG, "exit restore failed: " + t);
-            }
-        }, "exit-restore").start();
-
-        stopSelf();
+                        "cmd device_state state 1; sleep 0.3; "
+                        + "am start --display 1 -n com.tianweixing.atianwidget/.PowerAssistActivity");
+                Log.i(TAG, "hide: home on cover -> " + ok);
+            }, "hide-home").start();
+        } catch (Throwable ignored) { }
+        Log.i(TAG, "mirror hidden (window kept)");
     }
 
     @Override
@@ -863,7 +887,9 @@ public class CoverOverlayMirrorService extends Service {
         }
 
         void setBitmap(Bitmap b) {
-            if (mRoot != null && mRoot.getAlpha() < 1f) {
+            // 只有"未隐藏"时才自动显形。否则每帧都会把 alpha 拉回 1，
+            // 把 shutdown() 的隐藏覆盖掉（实测：日志说 hidden，画面照旧）。
+            if (!mHidden && mRoot != null && mRoot.getAlpha() < 1f) {
                 mRoot.setAlpha(1f);
                 Log.i(TAG, "first frame, overlay visible");
             }

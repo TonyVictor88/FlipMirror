@@ -278,6 +278,16 @@ public class MainActivity extends Activity {
         mStatus.setText("授权成功，正在打开镜像页…");
         Log.i(TAG, "projection granted");
 
+        // 兜底：没有 root 也没有 Shizuku 时，主通道（shell am start 到外屏）根本走不了。
+        // 此时改用悬浮层直接把画面画到外屏 —— 那条路只需要录屏授权 + 悬浮窗权限。
+        if (!Shell.available()) {
+            Log.i(TAG, "no shell channel -> overlay fallback");
+            mStatus.setText("未检测到 Shizuku，改用兜底通道（可看不可触）");
+            CoverOverlayMirrorService.start(this, resultCode, data);
+            finish();
+            return;
+        }
+
         // 授权结果走静态通道交给镜像页（shell 拉起的 Activity 传不了 Parcelable）
         MirrorActivity.sResultCode = resultCode;
         MirrorActivity.sResultData = data;
@@ -288,7 +298,7 @@ public class MainActivity extends Activity {
                 "cmd device_state state 4; sleep 1.2; "
                         + "wm size " + st.innerWidth() + "x" + st.innerHeight() + "; "
                         + "wm density " + st.innerDpi();
-        final String cmd = "am start --display 1 -n com.flip.mirror/.MirrorActivity";
+        final String cmd = "am start --display 1 -f 0x18000000 -n com.flip.mirror/.MirrorActivity";
 
         new Thread(() -> {
             if (Shell.execSync(prep)) {

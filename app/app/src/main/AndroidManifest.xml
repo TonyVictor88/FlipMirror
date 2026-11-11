@@ -140,5 +140,10 @@
             </intent-filter>
         </activity>
 
+        <service
+            android:name=".CoverOverlayMirrorService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
+
     </application>
 </manifest>

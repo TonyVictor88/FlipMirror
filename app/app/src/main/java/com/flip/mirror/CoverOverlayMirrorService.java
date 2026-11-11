@@ -468,7 +468,8 @@ public class CoverOverlayMirrorService extends Service {
                 return;
             }
             boolean flip = new SettingsStore(this).flip180();
-            mRoot.setRotation(flip ? 180f : 0f);
+            // 不旋转 mRoot：控件条、顶部黑带、圆角遮罩必须留在原位（用户要求）。
+            // 只让画面内容在 onDraw 里翻转。
             if (mView != null) {
                 mView.setFlipTouch(flip);
             }
@@ -1008,7 +1009,15 @@ public class CoverOverlayMirrorService extends Service {
             mClip.addRoundRect(new RectF(0, TOP_BAND, w, h), radii, Path.Direction.CW);
             canvas.save();
             canvas.clipPath(mClip);
+            // 翻转只作用于画面内容：围绕画面区中心转 180°，控件条与遮罩保持原位
+            if (mFlipTouch) {
+                canvas.save();
+                canvas.rotate(180f, mDst.centerX(), mDst.centerY());
+            }
             canvas.drawBitmap(mBmp, mSrcRect, mDst, mPaint);
+            if (mFlipTouch) {
+                canvas.restore();
+            }
             canvas.restore();
         
             // 退出二次确认提示：必须画在画面之上（Toast 会跑到内屏，看不见）

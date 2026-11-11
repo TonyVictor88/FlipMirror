@@ -156,6 +156,24 @@ public class CoverOverlayMirrorService extends Service {
      * startActivityForResult，而入口页会用 force_overlay 直接转到本服务。
      * 入口页落在哪个屏都无所谓 —— 画面是我们自己在 display 1 上画的。
      */
+    /** 重新读取内屏真实像素（改过 wm size 之后必须重读）。 */
+    private void refreshSrcSize() {
+        try {
+            DisplayManager dm = (DisplayManager) getSystemService(DISPLAY_SERVICE);
+            Display d0 = dm == null ? null : dm.getDisplay(Display.DEFAULT_DISPLAY);
+            if (d0 == null) {
+                return;
+            }
+            android.util.DisplayMetrics m = new android.util.DisplayMetrics();
+            d0.getRealMetrics(m);
+            if (m.widthPixels > 0 && m.heightPixels > 0) {
+                mSrcW = m.widthPixels;
+                mSrcH = m.heightPixels;
+                Log.i(TAG, "inner size now " + mSrcW + "x" + mSrcH);
+            }
+        } catch (Throwable ignored) { }
+    }
+
     private void acquireWakeLock() {
         try {
             android.os.PowerManager pm =
@@ -339,6 +357,21 @@ public class CoverOverlayMirrorService extends Service {
                 Log.w(TAG, "getMediaProjection returned null");
                 stopSelf();
                 return;
+            }
+
+            // 🔴 先把内屏调成与外屏内容区同比例（748:654 ≈ 1.144），否则画面必然出现黑边：
+            //    投屏是按内屏真实像素来的，比例不一致时怎么缩放都填不满。
+            if (Shell.available()) {
+                SettingsStore st = new SettingsStore(this);
+                String prep = "cmd device_state state 4; sleep 0.8; wm size "
+                        + st.innerWidth() + "x" + st.innerHeight()
+                        + "; wm density " + st.innerDpi();
+                boolean ok = Shell.execSync(prep);
+                Log.i(TAG, "prepare inner display -> " + ok);
+                try {
+                    Thread.sleep(1200);
+                } catch (InterruptedException ignored) { }
+                refreshSrcSize();
             }
 
             // 采集分辨率减半，降低内存与拷贝开销；显示时再放大到内容区
@@ -605,10 +638,11 @@ public class CoverOverlayMirrorService extends Service {
                 return;
             }
 
-            // 内容区：等比缩放到 (0, TOP_BAND, w, h) 里，居中留边
+            // 内容区：**铺满裁切**（取较大的缩放比），宁可裁边也不留透明边。
+            // 之前用 Math.min（等比适应）会在比例不一致时露出底下的壁纸，看着像"没撑满"。
             float availW = w;
             float availH = h - TOP_BAND;
-            float scale = Math.min(availW / mBmp.getWidth(), availH / mBmp.getHeight());
+            float scale = Math.max(availW / mBmp.getWidth(), availH / mBmp.getHeight());
             int dw = Math.round(mBmp.getWidth() * scale);
             int dh = Math.round(mBmp.getHeight() * scale);
             int left = Math.round((availW - dw) / 2f);
@@ -617,10 +651,11 @@ public class CoverOverlayMirrorService extends Service {
             mDst.set(left, top, left + dw, top + dh);
             mSrcRect.set(0, 0, mBmp.getWidth(), mBmp.getHeight());
 
-            // 圆角裁剪（半径 = 宽 × 0.064，与主通道一致）
-            float r = w * 0.064f;
+            // 整块窗口裁圆角：物理外屏 r=49px（dumpsys RoundedCorners 实测），
+            // 只裁内容矩形的话，四角会露出底下的壁纸，也是"遮罩不对"的来源之一。
+            float r = Math.min(w, h) * 0.068f;
             mClip.reset();
-            mClip.addRoundRect(new RectF(mDst), r, r, Path.Direction.CW);
+            mClip.addRoundRect(new RectF(0, 0, w, h), r, r, Path.Direction.CW);
             canvas.save();
             canvas.clipPath(mClip);
             canvas.drawBitmap(mBmp, mSrcRect, mDst, mPaint);

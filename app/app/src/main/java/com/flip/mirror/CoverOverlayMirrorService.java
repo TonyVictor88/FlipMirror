@@ -664,6 +664,7 @@ public class CoverOverlayMirrorService extends Service {
         private final Path mClip = new Path();
         private Bitmap mBmp;
         private final Rect mDst = new Rect();
+        private final Rect mCardRect = new Rect();
 
         private final TouchInjector mTouch = new TouchInjectorImpl();
 
@@ -696,32 +697,30 @@ public class CoverOverlayMirrorService extends Service {
             int w = getWidth();
             int h = getHeight();
 
-            // ① 整窗铺黑：圆角卡片之外露出来的就是这块黑，遮罩才"看得出形状"
+            // 整窗铺黑：顶部黑带 + 需要遮掉的角都靠它
             canvas.drawRect(0, 0, w, h, mBlack);
 
             if (mBmp == null) {
                 return;
             }
 
-            // ② 内容区 = 扣掉顶部黑带 + 四周内缩一圈，形成"圆角矩形卡片"
-            float availW = w - 2 * EDGE_INSET;
-            float availH = h - TOP_BAND - 2 * EDGE_INSET;
-            if (availW <= 0 || availH <= 0) {
-                return;
-            }
-
-            // ③ 卡片内部铺满裁切（宁可裁边，也不留透明缝）
+            // 内容铺满到边（不留内缩）：物理屏左/下/右下本来就带圆角，
+            // 只有"右上角"在顶部黑带与画面交界处会露出直角，需要单独补。
+            float availW = w;
+            float availH = h - TOP_BAND;
             float scale = Math.max(availW / mBmp.getWidth(), availH / mBmp.getHeight());
             int dw = Math.round(mBmp.getWidth() * scale);
             int dh = Math.round(mBmp.getHeight() * scale);
-            int left = EDGE_INSET + Math.round((availW - dw) / 2f);
-            int top = TOP_BAND + EDGE_INSET + Math.round((availH - dh) / 2f);
+            int left = Math.round((availW - dw) / 2f);
+            int top = TOP_BAND + Math.round((availH - dh) / 2f);
             mDst.set(left, top, left + dw, top + dh);
             mSrcRect.set(0, 0, mBmp.getWidth(), mBmp.getHeight());
 
-            // ④ 圆角卡片：半径写死 48（外屏 748 基准），裁内容后四角露出黑底
+            // 只把**右上角**裁成圆角，其余三角保持直角（跟随物理屏弧线）。
+            // radii 顺序：左上x,y · 右上x,y · 右下x,y · 左下x,y
+            float[] radii = new float[]{0f, 0f, CARD_RADIUS, CARD_RADIUS, 0f, 0f, 0f, 0f};
             mClip.reset();
-            mClip.addRoundRect(new RectF(mDst), CARD_RADIUS, CARD_RADIUS, Path.Direction.CW);
+            mClip.addRoundRect(new RectF(0, TOP_BAND, w, h), radii, Path.Direction.CW);
             canvas.save();
             canvas.clipPath(mClip);
             canvas.drawBitmap(mBmp, mSrcRect, mDst, mPaint);

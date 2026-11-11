@@ -730,10 +730,16 @@ public class CoverOverlayMirrorService extends Service {
                 //    一 reset，内屏回到 1080x1920，桌面要重排，经常变成空白页 ——
                 //    用户再点进来看到的就是纯壁纸（实测）。
                 //    保持 1600x1398 反而稳定：反正内屏看不见。
-                // 不关外屏：一关，退出后外屏立刻黑（用户看到"没恢复正常"）；
-                // 而且下次点图标时入口页画在关屏状态下 → 只看到壁纸。
-                // 保持双屏并发，退出后自然露出 SubHome，点图标也立刻能看到入口页。
-                boolean ok = true;
+                // 只拆悬浮层不够：d1 上没有任何 Activity 在画，画面就停在壁纸。
+                // 必须把外屏首页（SubHome）请回来 —— 发一次 display 1 的 HOME 键即可。
+                // 发 HOME 只是让 SubHome 回来，但它常出现"resumed 但不绘制"（只剩壁纸）。
+                // 显式把 SubHomeActivity 起一次，强制它重建窗口。
+                // 只发 HOME / 只起 SubHome 都不行：它会"resumed 但不绘制"，外屏停在壁纸。
+                // 可靠做法是让三星自己重建外屏：先退回单屏(state 1)再立刻恢复并发(state 4)，
+                // 系统会把 SubHome 重新摆上去并完整绘制。
+                boolean ok = Shell.execSync(
+                        "cmd device_state state 1; sleep 0.6; cmd device_state state 4");
+                android.util.Log.i(TAG, "exit: back to cover home -> " + ok);
                 Log.i(TAG, "exit: restore device_state 1 + wm reset -> " + ok);
             } catch (Throwable t) {
                 Log.w(TAG, "exit restore failed: " + t);

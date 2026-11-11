@@ -1,10 +1,12 @@
 # Build outputs
 build/
 app/build/
-*.apk
 *.aab
 *.ap_
 *.dex
+
+# 发布用 APK 要保留（否则别人没法下载）
+!dist/*.apk
 
 # Gradle
 .gradle/
@@ -16,11 +18,17 @@ local.properties
 *.iml
 .vscode/
 
-# OS
+# 第三方二进制与备份（体积大，且含分区影子等敏感内容）
+tools/
+backup/
+
+# 临时脚本
+patch_*.py
+
+# OS / 日志
 .DS_Store
 Thumbs.db
-
-# Termux scripts are kept (they are part of the setup guide)
-# but local test artifacts are not
 *.log
 _tmp/
+
+# Termux scripts are kept (they are part of the setup guide)

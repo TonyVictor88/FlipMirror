@@ -118,6 +118,9 @@ public class CoverOverlayMirrorService extends Service {
     /** 悬浮层当前处于"隐藏"状态（窗口还在，只是不可见/不可触）。 */
     private volatile boolean mHidden = false;
 
+    /** 是否已经因"抓到外屏自己"重启过一次投影（防死循环）。 */
+    private volatile boolean mRestarted = false;
+
     /**
      * 服务是否已经在跑。
      *
@@ -241,6 +244,42 @@ public class CoverOverlayMirrorService extends Service {
      * 入口页落在哪个屏都无所谓 —— 画面是我们自己在 display 1 上画的。
      */
     /** 添加控件条（几何写死）。可重复调用：已存在就先移除再加，保证只有一份。 */
+    /** 抓到的尺寸像不像外屏自己（而不是内屏）。 */
+    private boolean looksLikeCoverCapture(int capW, int capH) {
+        try {
+            int innerW = new SettingsStore(this).innerWidth();
+            // 内屏宽度通常 1600 左右，外屏 748。抓到明显小于内屏的一半，判为抓错。
+            return capW > 0 && capW * 2 < innerW;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /** 抓错时：释放当前投影，请入口页重新申请一次（只做一次，避免死循环）。 */
+    private void restartProjectionOnce() {
+        if (mRestarted) {
+            Log.w(TAG, "already restarted once, give up");
+            return;
+        }
+        mRestarted = true;
+        try {
+            if (mVirtualDisplay != null) {
+                mVirtualDisplay.release();
+                mVirtualDisplay = null;
+            }
+        } catch (Throwable ignored) { }
+        mProjectionAlive = false;
+        try {
+            Intent it = new Intent(this, MainActivity.class);
+            it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+            it.putExtra("auto_start", true);
+            it.putExtra("force_overlay", true);
+            startActivity(it);
+        } catch (Throwable t) {
+            Log.w(TAG, "restart projection failed: " + t);
+        }
+    }
+
     private void addControlBar() {
         try {
             if (mBar != null && mRoot != null) {
@@ -333,7 +372,10 @@ public class CoverOverlayMirrorService extends Service {
                     }
                     if (mWm != null && (mBar == null || !mBar.isAttachedToWindow())) {
                         Log.w(TAG, "control bar missing, re-adding");
-                        addControlBar();
+                        // 纯净模式下不补控件条
+                        if (!new SettingsStore(CoverOverlayMirrorService.this).cleanUi()) {
+                            addControlBar();
+                        }
                     } else if (mBar != null) {
                         // 每拍都提一次层级，防止被后加的全屏窗盖住
                         try {
@@ -689,6 +731,14 @@ public class CoverOverlayMirrorService extends Service {
 
             mProjectionAlive = true;
             Log.i(TAG, "projection started " + capW + "x" + capH);
+
+            // 录屏可能绑到外屏自己（748x720 那种），结果是"对着镜子拍镜子"：
+            // 画面里出现我们自己的控件条，无限嵌套。
+            // 判据：宽度接近外屏宽度（而不是内屏），就判定抓错了，自动重申请一次。
+            if (looksLikeCoverCapture(capW, capH)) {
+                Log.w(TAG, "capture looks like cover (" + capW + "x" + capH + ") -> restart");
+                restartProjectionOnce();
+            }
         } catch (Throwable t) {
             Log.e(TAG, "startProjection failed", t);
         }
@@ -913,6 +963,9 @@ public class CoverOverlayMirrorService extends Service {
 
         /** 界面是否 180° 翻转（触摸坐标需要镜像）。 */
         private boolean mFlipTouch = false;
+
+        /** 纯净模式：不裁剪圆角遮罩、内容铺满整屏。 */
+        private boolean mCleanDraw = false;
         private final Path mClip = new Path();
         private Bitmap mBmp;
         private final Rect mDst = new Rect();
@@ -952,6 +1005,12 @@ public class CoverOverlayMirrorService extends Service {
         /** 由服务在应用翻转时同步过来。 */
         void setFlipTouch(boolean flip) {
             mFlipTouch = flip;
+        }
+
+        void setCleanDraw(boolean clean) {
+            mCleanDraw = clean;
+            requestLayout();
+            invalidate();
         }
 
         void showExitHint(long ms) {
@@ -996,7 +1055,9 @@ public class CoverOverlayMirrorService extends Service {
             int dw = Math.round(mBmp.getWidth() * scale);
             int dh = Math.round(mBmp.getHeight() * scale);
             int left = Math.round((availW - dw) / 2f);
-            int top = TOP_BAND + Math.round((availH - dh) / 2f);
+            int bandTop = mCleanDraw ? 0 : TOP_BAND;
+            float availH2 = h - bandTop;
+            int top = bandTop + Math.round((availH2 - dh) / 2f);
             mDst.set(left, top, left + dw, top + dh);
             mSrcRect.set(0, 0, mBmp.getWidth(), mBmp.getHeight());
 
@@ -1015,7 +1076,9 @@ public class CoverOverlayMirrorService extends Service {
             mClip.reset();
             mClip.addRoundRect(new RectF(0, TOP_BAND, w, h), radii, Path.Direction.CW);
             canvas.save();
-            canvas.clipPath(mClip);
+            if (!mCleanDraw) {
+                canvas.clipPath(mClip);
+            }
             // 翻转只作用于画面内容：围绕画面区中心转 180°，控件条与遮罩保持原位
             if (mFlipTouch) {
                 canvas.save();

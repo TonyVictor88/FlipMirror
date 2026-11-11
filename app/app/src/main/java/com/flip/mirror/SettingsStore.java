@@ -76,6 +76,9 @@ public class SettingsStore {
     public int buttonSizeDp()   { return getInt(K_BTN_SIZE, 32); }
     /** 圆角半径（物理像素，基准 748 宽） */
     /** 右上角圆角开关（默认开）。 */
+    /** 纯净模式：不画控件条、不画圆角遮罩（避免和第三方外屏 UI 打架）。 */
+    public static final String K_CLEAN_UI = "clean_ui";
+
     /** 界面上下翻转（整个画面 + 控件条一起转 180°）。 */
     public static final String K_FLIP_180 = "flip180";
 
@@ -92,6 +95,7 @@ public class SettingsStore {
 
     // ---------- 触摸与输入 ----------
     public boolean flip180() { return getBool(K_FLIP_180, false); }
+    public boolean cleanUi() { return getBool(K_CLEAN_UI, false); }
 
     public boolean touchEnabled() { return getBool(K_TOUCH_ENABLE, true); }
     public int touchScalePct()     { return getInt(K_TOUCH_SCALE, 100); }

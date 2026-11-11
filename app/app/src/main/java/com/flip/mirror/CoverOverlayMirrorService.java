@@ -476,19 +476,16 @@ public class CoverOverlayMirrorService extends Service {
             // 控件条：位置不动，但**方向和顺序一起倒**（用户要求"四个键方向得跟着倒转"）。
             // 只转这条，不转根容器，所以它仍停在右上角原位。
             if (mBar != null) {
-                mBar.setRotation(flip ? 180f : 0f);
+                // 不再整体旋转（那样图标都倒着）。改成 RTL 布局：
+                // 子 View 右起排列 → 从左到右变成 ✕ □ ○ ‹，图标本身保持正立。
+                mBar.setRotation(0f);
+                mBar.setLayoutDirection(flip
+                        ? android.view.View.LAYOUT_DIRECTION_RTL
+                        : android.view.View.LAYOUT_DIRECTION_LTR);
                 // 翻转后条内顺序也反了（✕ 跑到条的内侧），所以把整条挪到另一端，
                 // 让 ✕ 仍落在屏幕最外角（用户要求"X 应该也在最角落"）。
-                try {
-                    android.widget.FrameLayout.LayoutParams lp =
-                            (android.widget.FrameLayout.LayoutParams) mBar.getLayoutParams();
-                    int g = flip ? (android.view.Gravity.TOP | android.view.Gravity.START)
-                                 : (android.view.Gravity.TOP | android.view.Gravity.END);
-                    if (lp.gravity != g) {
-                        lp.gravity = g;
-                        mBar.setLayoutParams(lp);
-                    }
-                } catch (Throwable ignored) { }
+                // 位置保持不动（用户要求：控件和遮罩始终在原位）；只反顺序，
+                // 由上面的 LAYOUT_DIRECTION_RTL 完成。
             }
             Log.i(TAG, "flip180 = " + flip);
         } catch (Throwable t) {

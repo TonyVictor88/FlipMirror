@@ -82,6 +82,15 @@ public class CoverOverlayMirrorService extends Service {
 
     private int mSrcW = 1080, mSrcH = 1920;   // 内屏实际像素（只用于等比缩放）
 
+    /**
+     * 录屏会话是否还活着。
+     *
+     * 关屏时系统会主动 stop 掉 MediaProjection（日志：projection stopped by system），
+     * 画面就冻在最后一帧。所以亮屏时必须重新申请一次。
+     */
+    private volatile boolean mProjectionAlive = false;
+    private android.content.BroadcastReceiver mScreenOn;
+
     /** 由 Activity 调用：带着录屏授权启动兜底渲染。 */
     public static void start(Context ctx, int resultCode, Intent data) {
         sResultCode = resultCode;
@@ -99,6 +108,7 @@ public class CoverOverlayMirrorService extends Service {
         super.onCreate();
         startForegroundWithNotification();
         showOverlay();
+        registerScreenOnRecovery();
     }
 
     private void startForegroundWithNotification() {
@@ -126,10 +136,67 @@ public class CoverOverlayMirrorService extends Service {
         }
     }
 
+    /**
+     * 亮屏 → 若录屏会话已被系统掐掉，就自动重新申请一次。
+     *
+     * 不需要人点：装机时已经 {@code appops set PROJECT_MEDIA allow}，
+     * 所以 {@code createScreenCaptureIntent} 会直接返回 RESULT_OK（实测无弹窗）。
+     *
+     * 拉起的是 MainActivity（不是直接要授权）：拿授权必须走 Activity 的
+     * startActivityForResult，而入口页会用 force_overlay 直接转到本服务。
+     * 入口页落在哪个屏都无所谓 —— 画面是我们自己在 display 1 上画的。
+     */
+    private void registerScreenOnRecovery() {
+        try {
+            mScreenOn = new android.content.BroadcastReceiver() {
+                @Override
+                public void onReceive(android.content.Context c, Intent i) {
+                    if (i == null || !Intent.ACTION_SCREEN_ON.equals(i.getAction())) {
+                        return;
+                    }
+                    // 外屏必须每次亮屏都重新点亮：关屏会撤掉双屏并发，
+                    // 与外屏当前显示什么无关（录屏还活着也一样会黑）。
+                    if (Shell.available()) {
+                        boolean ok = Shell.execSync("cmd device_state state 4");
+                        Log.i(TAG, "screen on: device_state 4 -> " + ok);
+                    } else {
+                        Log.w(TAG, "screen on: no shell, cover display stays off");
+                    }
+                    if (mProjectionAlive) {
+                        Log.i(TAG, "screen on: projection alive, only display re-enabled");
+                        return;
+                    }
+                    Log.i(TAG, "screen on: projection dead, re-acquiring");
+                    try {
+                        Intent it = new Intent(CoverOverlayMirrorService.this, MainActivity.class);
+                        it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                        it.putExtra("auto_start", true);
+                        it.putExtra("force_overlay", true);
+                        startActivity(it);
+                    } catch (Throwable t) {
+                        Log.w(TAG, "re-acquire failed: " + t);
+                    }
+                }
+            };
+            android.content.IntentFilter f =
+                    new android.content.IntentFilter(Intent.ACTION_SCREEN_ON);
+            if (Build.VERSION.SDK_INT >= 33) {
+                registerReceiver(mScreenOn, f, android.content.Context.RECEIVER_NOT_EXPORTED);
+            } else {
+                registerReceiver(mScreenOn, f);
+            }
+            Log.i(TAG, "screen-on recovery registered");
+        } catch (Throwable t) {
+            Log.w(TAG, "register screen-on recovery failed: " + t);
+        }
+    }
+
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         startProjection();
-        return START_NOT_STICKY;
+        // 关屏时三星会把前台服务杀掉（实测服务数归 0）。用 STICKY 让系统拉回来，
+        // 拉回来时没有授权数据 → 上面的分支会自动重新申请。
+        return START_STICKY;
     }
 
     /* ------------------------------------------------------------ 悬浮层 */
@@ -218,9 +285,22 @@ public class CoverOverlayMirrorService extends Service {
     /* ------------------------------------------------------------ 录屏 */
 
     private void startProjection() {
+        // 🔴 重入保护：关屏恢复会再次调用本方法。旧的 VirtualDisplay / ImageReader
+        //    不释放的话，两路帧会都往同一个 View 上画，画面叠影（实测状态栏出现两份）。
+        releaseProjection();
         if (sResultData == null) {
-            Log.w(TAG, "no projection data, stop");
-            stopSelf();
+            // 被系统杀掉后重启（START_STICKY）时，静态通道里的授权早就没了。
+            // 与其停掉，不如自己把入口页拉起来重新取一次授权（免弹窗，appops 已放行）。
+            Log.w(TAG, "no projection data, re-acquire via MainActivity");
+            try {
+                Intent it = new Intent(this, MainActivity.class);
+                it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                it.putExtra("auto_start", true);
+                it.putExtra("force_overlay", true);
+                startActivity(it);
+            } catch (Throwable t) {
+                Log.w(TAG, "re-acquire failed: " + t);
+            }
             return;
         }
         try {
@@ -293,6 +373,7 @@ public class CoverOverlayMirrorService extends Service {
                 @Override
                 public void onStop() {
                     Log.i(TAG, "projection stopped by system");
+                    mProjectionAlive = false;
                 }
             }, new Handler(getMainLooper()));
 
@@ -302,10 +383,30 @@ public class CoverOverlayMirrorService extends Service {
                     DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                     mReader.getSurface(), null, h);
 
+            mProjectionAlive = true;
             Log.i(TAG, "projection started " + capW + "x" + capH);
         } catch (Throwable t) {
             Log.e(TAG, "startProjection failed", t);
         }
+    }
+
+    /** 释放上一次的采集资源（虚拟屏 / ImageReader / 线程）。 */
+    private void releaseProjection() {
+        try {
+            if (mVirtualDisplay != null) {
+                mVirtualDisplay.release();
+                mVirtualDisplay = null;
+            }
+            if (mReader != null) {
+                mReader.setOnImageAvailableListener(null, null);
+                mReader.close();
+                mReader = null;
+            }
+            if (mThread != null) {
+                mThread.quitSafely();
+                mThread = null;
+            }
+        } catch (Throwable ignored) { }
     }
 
     private void shutdown() {
@@ -324,6 +425,20 @@ public class CoverOverlayMirrorService extends Service {
 
     @Override
     public void onDestroy() {
+        // 🔴 必须移除悬浮 View：服务被系统回收后 View 仍挂在窗口上，
+        //    下次启动会再叠一层 —— 画面出现重影/两份状态栏（实测踩过）。
+        try {
+            if (mBar != null && mWm != null) {
+                mWm.removeView(mBar);
+            }
+        } catch (Throwable ignored) { }
+        try {
+            if (mView != null && mWm != null) {
+                mWm.removeView(mView);
+            }
+        } catch (Throwable ignored) { }
+        mBar = null;
+        mView = null;
         try {
             if (mVirtualDisplay != null) {
                 mVirtualDisplay.release();
@@ -338,6 +453,12 @@ public class CoverOverlayMirrorService extends Service {
                 mThread.quitSafely();
             }
         } catch (Throwable ignored) { }
+        try {
+            if (mScreenOn != null) {
+                unregisterReceiver(mScreenOn);
+            }
+        } catch (Throwable ignored) { }
+        mProjectionAlive = false;
         sResultCode = 0;
         sResultData = null;
         super.onDestroy();

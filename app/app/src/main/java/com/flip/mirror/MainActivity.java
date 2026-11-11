@@ -280,7 +280,10 @@ public class MainActivity extends Activity {
 
         // 兜底：没有 root 也没有 Shizuku 时，主通道（shell am start 到外屏）根本走不了。
         // 此时改用悬浮层直接把画面画到外屏 —— 那条路只需要录屏授权 + 悬浮窗权限。
-        if (!Shell.available()) {
+        // 单一通道：一律用悬浮层渲染。
+        // 之前分"主通道（MirrorActivity）/ 兜底（悬浮层）"，结果关屏恢复时两条都在跑，
+        // 窗口列表里同时出现 3 个悬浮窗 + 1 个 MirrorActivity，画面直接重影。
+        if (true) {
             Log.i(TAG, "no shell channel -> overlay fallback");
             mStatus.setText("未检测到 Shizuku，改用兜底通道（可看不可触）");
             CoverOverlayMirrorService.start(this, resultCode, data);

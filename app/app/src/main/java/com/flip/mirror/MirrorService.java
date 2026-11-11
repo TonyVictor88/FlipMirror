@@ -35,7 +35,8 @@ public class MirrorService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
-        setupScreenOnReceiver();
+        // ⚠️ 亮屏恢复已停用：恢复统一由 CoverOverlayMirrorService 负责。
+        //    两处都恢复会把 MirrorActivity 通道也拉起来，和悬浮层叠在一起（重影）。
         NotificationManager nm = getSystemService(NotificationManager.class);
         if (nm != null) {
             NotificationChannel ch = new NotificationChannel(CH_ID, "镜像运行中",

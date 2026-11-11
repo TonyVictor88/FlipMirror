@@ -91,7 +91,10 @@ public class MainActivity extends Activity {
                 && (getIntent() == null
                     || !getIntent().getBooleanExtra("auto_start", false))) {
             Log.i(TAG, "not mirroring, auto start from FlipMirror entry");
-            requestProjection();
+            // 不能在 onCreate 里直接 startActivityForResult：Activity 还没 resumed 时
+            // 请求可能被系统丢掉（实测：日志有 auto start，但没有 projection granted）。
+            // 推到 resumed 后再走，并给窗口一点时间。
+            getWindow().getDecorView().postDelayed(this::requestProjection, 500);
         }
         ensureShizukuPermission();
 
@@ -264,6 +267,15 @@ public class MainActivity extends Activity {
 
     /** 申请录屏授权（appops 已预授权，系统页会自动放行）。 */
     private void requestProjection() {
+        // 先把双屏并发打开：外屏(state OFF)不亮的话，录屏授权对话框没有地方显示，
+        // 流程会卡在 requestProjection 之后一动不动（实测：日志停在 on display 0，画面全黑）。
+        if (Shell.available()) {
+            boolean ok = Shell.execSync("cmd device_state state 4");
+            Log.i(TAG, "pre-enable dual screen -> " + ok);
+            try {
+                Thread.sleep(800);
+            } catch (InterruptedException ignored) { }
+        }
         // 🔴 只有落在外屏的那个实例才能发起：本页发现不在 display 1 时会用 shell 重开一份自己，
         //    旧实例若继续申请，就会拿到第二份录屏授权、拉起第二个镜像实例，
         //    两个实例抢同一块屏幕 → 第二个报「录屏授权已失效」并把画面踢掉（实测踩过）。

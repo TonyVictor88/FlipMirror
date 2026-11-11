@@ -674,8 +674,11 @@ public class CoverOverlayMirrorService extends Service {
         //    表现就是"点退出回不到外屏首页"（黑屏/悬空）。
         new Thread(() -> {
             try {
-                boolean ok = Shell.execSync(
-                        "cmd device_state state 1; wm size reset; wm density reset");
+                // ⚠️ 只还双屏状态，**不 reset 分辨率**：
+                //    一 reset，内屏回到 1080x1920，桌面要重排，经常变成空白页 ——
+                //    用户再点进来看到的就是纯壁纸（实测）。
+                //    保持 1600x1398 反而稳定：反正内屏看不见。
+                boolean ok = Shell.execSync("cmd device_state state 1");
                 Log.i(TAG, "exit: restore device_state 1 + wm reset -> " + ok);
             } catch (Throwable t) {
                 Log.w(TAG, "exit restore failed: " + t);

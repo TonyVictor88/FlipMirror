@@ -23,14 +23,34 @@ public class QuickMirrorActivity extends Activity {
 
     private static final String TAG = "FlipMirror";
 
+    /** 问 ActivityManager：本进程的服务是否真的在运行（跨进程、不受静态量与残留文件影响）。 */
+    private boolean isServiceAlive() {
+        try {
+            android.app.ActivityManager am =
+                    (android.app.ActivityManager) getSystemService(ACTIVITY_SERVICE);
+            if (am == null) {
+                return false;
+            }
+            for (android.app.ActivityManager.RunningServiceInfo info
+                    : am.getRunningServices(Integer.MAX_VALUE)) {
+                if (info.service != null && getPackageName().equals(info.service.getPackageName())
+                        && CoverOverlayMirrorService.class.getName()
+                                .equals(info.service.getClassName())) {
+                    return true;
+                }
+            }
+        } catch (Throwable ignored) { }
+        return false;
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         // 幂等：镜像已经在跑就别再起一份（用户会从镜像画面里点这个图标）
-        // 跨进程判据：静态量只在同一进程有效；装包/进程重建后会误判为"没在跑"，
-        // 于是起了第二份服务（实测服务数 1→2、画面花掉）。这里同时看静态量与文件。
-        boolean running = CoverOverlayMirrorService.isRunning()
-                || new java.io.File(getFilesDir(), "mirror_running.flag").exists();
+        // 判"是否已在跑"必须问系统，不能只看静态量或标记文件：
+        //  - 静态量在进程重建后失效（会误判没在跑 → 起第二份）
+        //  - 标记文件在进程被杀后残留（会误判在跑 → 点了什么都不发生，实测踩过）
+        boolean running = CoverOverlayMirrorService.isRunning() || isServiceAlive();
         if (running) {
             Log.i(TAG, "already mirroring, ignore this launch");
             finish();

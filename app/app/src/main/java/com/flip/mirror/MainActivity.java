@@ -55,21 +55,32 @@ public class MainActivity extends Activity {
      * 用户点一次「允许」之后才会持久化，重装/换签名后需要重新点。
      */
     private void ensureShizukuPermission() {
-        try {
-            if (!rikka.shizuku.Shizuku.pingBinder()) {
-                Log.i(TAG, "shizuku server not running, skip permission request");
-                return;
+        // 刚开机时 Shizuku 的 binder 常常还没就绪（实测日志：
+        // "binder haven't been received" → 直接跳过申请 → 权限停在 0 → 自检失败）。
+        // 所以在后台重试几次，别一次失败就放弃。
+        new Thread(() -> {
+            for (int i = 0; i < 4; i++) {
+                try {
+                    if (rikka.shizuku.Shizuku.pingBinder()) {
+                        int granted = rikka.shizuku.Shizuku.checkSelfPermission();
+                        Log.i(TAG, "shizuku permission state = " + granted + " (try " + i + ")");
+                        if (granted != 0 && !sPermRequested) {
+                            sPermRequested = true;
+                            runOnUiThread(() -> rikka.shizuku.Shizuku.requestPermission(1001));
+                            Log.i(TAG, "requested shizuku permission");
+                        }
+                        return;
+                    }
+                    Log.i(TAG, "shizuku binder not ready, retry " + i);
+                } catch (Throwable t) {
+                    Log.w(TAG, "ensureShizukuPermission failed: " + t);
+                }
+                try {
+                    Thread.sleep(1200);
+                } catch (InterruptedException ignored) { }
             }
-            int granted = rikka.shizuku.Shizuku.checkSelfPermission();
-            Log.i(TAG, "shizuku permission state = " + granted);
-            if (granted != 0 && !sPermRequested) {
-                sPermRequested = true;
-                rikka.shizuku.Shizuku.requestPermission(1001);
-                Log.i(TAG, "requested shizuku permission");
-            }
-        } catch (Throwable t) {
-            Log.w(TAG, "ensureShizukuPermission failed: " + t);
-        }
+            Log.w(TAG, "shizuku binder still not ready after retries");
+        }, "shizuku-retry").start();
     }
 
     /** 启动后 6 秒内若服务没起来，补一次申请（最多一次）。 */
@@ -102,6 +113,30 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // 有概率被启动到内屏（display 0）—— 内屏本来就坏，等于什么都没发生。
+        // 检测到就立刻把自己搬到外屏再退出本实例。
+        try {
+            boolean auto = getIntent() != null && getIntent().getBooleanExtra("auto_start", false);
+            int disp = getDisplay() != null ? getDisplay().getDisplayId() : -1;
+            if (disp == 0 && !auto) {
+                Log.i(TAG, "launched on inner display, hop to cover");
+                android.content.Intent it = new android.content.Intent(this, MainActivity.class);
+                it.putExtra("auto_start", auto);
+                if (android.os.Build.VERSION.SDK_INT >= 26) {
+                    android.app.ActivityOptions opts =
+                            android.app.ActivityOptions.makeBasic();
+                    opts.setLaunchDisplayId(1);
+                    startActivity(it, opts.toBundle());
+                } else {
+                    it.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+                    startActivity(it);
+                }
+                finish();
+                return;
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "display hop failed: " + t);
+        }
         // 若上次按下"开始镜像"后促成了切屏，重建完这里接着申请
         try {
             if (getSharedPreferences(PREFS_UI, MODE_PRIVATE).getBoolean(K_PENDING_START, false)) {

@@ -131,6 +131,11 @@ public class CoverOverlayMirrorService extends Service {
      */
     private static volatile boolean sUserExited = false;
 
+    /** 看门狗拉起前调用：清掉"用户已退出"，否则 onStartCommand 会立刻自我停止。 */
+    public static void clearUserExited() {
+        sUserExited = false;
+    }
+
     public static boolean isRunning() {
         return sRunning;
     }
@@ -163,6 +168,12 @@ public class CoverOverlayMirrorService extends Service {
         super.onCreate();
         sRunning = true;
         mStartAt = android.os.SystemClock.elapsedRealtime();
+        // 落盘标记：告诉看门狗"用户期望正在投屏"。进程被杀也不丢。
+        try {
+            getSharedPreferences(KeepAliveReceiver.PREFS, MODE_PRIVATE).edit()
+                    .putBoolean(KeepAliveReceiver.KEY_SHOULD_MIRROR, true).apply();
+            KeepAliveReceiver.schedule(this);
+        } catch (Throwable ignored) { }
         mShuttingDown = false;
         sUserExited = false;
         try {
@@ -672,6 +683,11 @@ public class CoverOverlayMirrorService extends Service {
         //    表现就是"点了退出、回到外屏首页，但控件条还挂在上面"（实测踩过）。
         mShuttingDown = true;
         sUserExited = true;
+        try {
+            getSharedPreferences(KeepAliveReceiver.PREFS, MODE_PRIVATE).edit()
+                    .putBoolean(KeepAliveReceiver.KEY_SHOULD_MIRROR, false).apply();
+            KeepAliveReceiver.cancel(this);
+        } catch (Throwable ignored) { }
         try {
             if (mBarWatchdog != null) {
                 mBarWatchdog.removeCallbacksAndMessages(null);

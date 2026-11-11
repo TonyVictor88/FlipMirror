@@ -148,5 +148,13 @@
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />
 
+        <receiver
+            android:name=".KeepAliveReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.flip.mirror.KEEPALIVE" />
+            </intent-filter>
+        </receiver>
+
     </application>
 </manifest>

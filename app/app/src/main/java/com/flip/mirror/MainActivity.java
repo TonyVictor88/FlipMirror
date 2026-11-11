@@ -75,6 +75,10 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        if (getIntent() != null && getIntent().getBooleanExtra("auto_start", false)) {
+            // 看门狗/恢复路径拉起：把"用户已退出"状态复位，允许重新开始
+            CoverOverlayMirrorService.clearUserExited();
+        }
         // 幂等：镜像已经在跑时，再点「FlipMirror」图标应当什么都不做。
         // 之前会打开入口页并把正在运行的悬浮层顶掉（实测窗口 1->2，外屏只剩壁纸）。
         // 只有带 auto_start（看门狗/亮屏恢复）时才继续走流程。

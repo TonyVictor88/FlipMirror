@@ -118,6 +118,16 @@ public class CoverOverlayMirrorService extends Service {
      */
     private static volatile boolean sRunning = false;
 
+    /**
+     * 用户主动点了 ✕ 退出。
+     *
+     * 服务是 START_STICKY：stopSelf() 之后系统会把它拉回来，
+     * 于是"退出"看起来没生效（实测：点 ✕ 后服务数仍为 1），
+     * 再点图标就变成两份服务叠在一起、画面花掉。
+     * 用这个标记区分"被系统杀"和"用户要退"。
+     */
+    private static volatile boolean sUserExited = false;
+
     public static boolean isRunning() {
         return sRunning;
     }
@@ -134,6 +144,7 @@ public class CoverOverlayMirrorService extends Service {
 
     /** 由 Activity 调用：带着录屏授权启动兜底渲染。 */
     public static void start(Context ctx, int resultCode, Intent data) {
+        sUserExited = false;
         sResultCode = resultCode;
         sResultData = data;
         Intent it = new Intent(ctx, CoverOverlayMirrorService.class);
@@ -149,6 +160,10 @@ public class CoverOverlayMirrorService extends Service {
         super.onCreate();
         sRunning = true;
         mShuttingDown = false;
+        sUserExited = false;
+        try {
+            new java.io.File(getFilesDir(), "mirror_running.flag").createNewFile();
+        } catch (Throwable ignored) { }
         startForegroundWithNotification();
         acquireWakeLock();
         showOverlay();
@@ -354,6 +369,11 @@ public class CoverOverlayMirrorService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        if (sUserExited) {
+            Log.i(TAG, "user exited earlier, stay stopped");
+            stopSelf();
+            return START_NOT_STICKY;
+        }
         startProjection();
         // 关屏时三星会把前台服务杀掉（实测服务数归 0）。用 STICKY 让系统拉回来，
         // 拉回来时没有授权数据 → 上面的分支会自动重新申请。
@@ -631,6 +651,7 @@ public class CoverOverlayMirrorService extends Service {
         // 🔴 先停看门狗再拆视图：否则 3 秒后它发现控件条没了，会立刻补回来 ——
         //    表现就是"点了退出、回到外屏首页，但控件条还挂在上面"（实测踩过）。
         mShuttingDown = true;
+        sUserExited = true;
         try {
             if (mBarWatchdog != null) {
                 mBarWatchdog.removeCallbacksAndMessages(null);
@@ -706,6 +727,9 @@ public class CoverOverlayMirrorService extends Service {
             }
         } catch (Throwable ignored) { }
         mWakeLock = null;
+        try {
+            new java.io.File(getFilesDir(), "mirror_running.flag").delete();
+        } catch (Throwable ignored) { }
         mProjectionAlive = false;
         sRunning = false;
         sResultCode = 0;

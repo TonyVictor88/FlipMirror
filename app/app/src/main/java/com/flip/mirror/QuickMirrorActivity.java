@@ -27,7 +27,11 @@ public class QuickMirrorActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         // 幂等：镜像已经在跑就别再起一份（用户会从镜像画面里点这个图标）
-        if (CoverOverlayMirrorService.isRunning()) {
+        // 跨进程判据：静态量只在同一进程有效；装包/进程重建后会误判为"没在跑"，
+        // 于是起了第二份服务（实测服务数 1→2、画面花掉）。这里同时看静态量与文件。
+        boolean running = CoverOverlayMirrorService.isRunning()
+                || new java.io.File(getFilesDir(), "mirror_running.flag").exists();
+        if (running) {
             Log.i(TAG, "already mirroring, ignore this launch");
             finish();
             return;

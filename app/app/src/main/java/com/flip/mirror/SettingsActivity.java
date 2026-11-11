@@ -11,6 +11,7 @@ import android.util.Log;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
+import android.view.MotionEvent;
 import android.view.ViewGroup;
 import android.widget.EditText;
 import android.widget.LinearLayout;
@@ -316,7 +317,7 @@ public class SettingsActivity extends Activity {
         wrap.setPadding(Math.round(16 * density), 0, Math.round(16 * density), Math.round(10 * density));
         card.addView(wrap);
 
-        SeekBar sb = new ModernSeek(this);
+        ModernSeek sb = new ModernSeek(this);
         sb.setMax(max - min);
         sb.setProgress(Math.max(0, Math.min(max - min, store.getInt(key, def) - min)));
         sb.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
@@ -407,12 +408,20 @@ public class SettingsActivity extends Activity {
                 .show();
     }
 
-    /** 细轨道 + 圆形滑块的 SeekBar（系统默认是方头，看着旧）。 */
-    private static class ModernSeek extends SeekBar {
+    /**
+     * 自绘滑杆：细轨道 + 圆形滑块。
+     *
+     * 不再继承 SeekBar —— 从 SeekBar 派生时把 drawable 清空后 onMeasure 量得高度 0，
+     * 整条滑杆直接消失（实测两版都没画出来）。改成继承 View 自己量、自己画、自己收触摸。
+     */
+    private static class ModernSeek extends View {
         private final Paint track = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint prog = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint thumb = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final float density;
+        private int max = 100;
+        private int value = 0;
+        private SeekBar.OnSeekBarChangeListener listener;
 
         ModernSeek(android.content.Context c) {
             super(c);
@@ -420,32 +429,63 @@ public class SettingsActivity extends Activity {
             track.setColor(0xFF2B323B);
             prog.setColor(0xFFA8C7FA);
             thumb.setColor(0xFFE8EDF3);
-            // 没有 drawable 时 SeekBar 量得高度为 0 → 整条滑杆消失。
-            // 显式给个头，保证能画出来。
-            setMinimumHeight(Math.round(28 * density));
-            setSplitTrack(false);
-            setBackground(null);
-            if (android.os.Build.VERSION.SDK_INT >= 16) {
-                setProgressDrawable(null);
-                setThumb(null);
+            setClickable(true);
+        }
+
+        void setMax(int m) { max = Math.max(1, m); invalidate(); }
+        int getMax() { return max; }
+        void setProgress(int p) { value = Math.max(0, Math.min(max, p)); invalidate(); }
+        int getProgress() { return value; }
+        void setOnSeekBarChangeListener(SeekBar.OnSeekBarChangeListener l) { listener = l; }
+
+        @Override
+        protected void onMeasure(int wSpec, int hSpec) {
+            int h = Math.round(36 * density);
+            setMeasuredDimension(resolveSize(getSuggestedMinimumWidth(), wSpec), h);
+        }
+
+        @Override
+        protected void onDraw(android.graphics.Canvas cv) {
+            float w = getWidth(), cy = getHeight() / 2f;
+            float tr = 3 * density, r = 9 * density;
+            float left = r, right = w - r;
+            if (right <= left) return;
+            cv.drawRoundRect(left, cy - tr, right, cy + tr, tr, tr, track);
+            float t = (float) value / max;
+            float px = left + (right - left) * t;
+            cv.drawRoundRect(left, cy - tr, px, cy + tr, tr, tr, prog);
+            cv.drawCircle(px, cy, r, thumb);
+            Log.i(TAG, "seek drawn v=" + value + "/" + max + " w=" + w);
+        }
+
+        private void applyTouch(float x) {
+            float r = 9 * density;
+            float left = r, right = getWidth() - r;
+            float t = (x - left) / Math.max(1f, (right - left));
+            int nv = Math.round(Math.max(0f, Math.min(1f, t)) * max);
+            if (nv != value) {
+                value = nv;
+                invalidate();
+                if (listener != null) listener.onProgressChanged(null, value, true);
             }
         }
 
         @Override
-        protected synchronized void onDraw(android.graphics.Canvas cv) {
-            float w = getWidth();
-            float cy = getHeight() / 2f;
-            float th = 6 * density;       // 轨道厚
-            float tr = th / 2f;
-            float r  = 9 * density;       // 滑块半径
-            float left = r, right = w - r;
-            if (right <= left) return;
-
-            cv.drawRoundRect(left, cy - tr, right, cy + tr, tr, tr, track);
-            float t = getMax() == 0 ? 0f : (float) getProgress() / getMax();
-            float px = left + (right - left) * t;
-            cv.drawRoundRect(left, cy - tr, px, cy + tr, tr, tr, prog);
-            cv.drawCircle(px, cy, r, thumb);
+        public boolean onTouchEvent(MotionEvent e) {
+            switch (e.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                case MotionEvent.ACTION_MOVE:
+                    if (listener != null) listener.onStartTrackingTouch(null);
+                    applyTouch(e.getX());
+                    return true;
+                case MotionEvent.ACTION_UP:
+                case MotionEvent.ACTION_CANCEL:
+                    if (listener != null) listener.onStopTrackingTouch(null);
+                    return true;
+                default:
+                    return true;
+            }
         }
     }
+
 }

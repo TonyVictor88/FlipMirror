@@ -27,6 +27,8 @@ public class SettingsStore {
     public static final String K_BAR_ALPHA    = "bar_alpha";
     public static final String K_BTN_SIZE     = "btn_size";
     public static final String K_CORNER_R     = "corner_r";
+    /** 是否给外屏右上角补圆角（左上/左下/右下物理屏自带，无需处理）。 */
+    public static final String K_CORNER_MASK  = "corner_mask_on";
     public static final String K_ICON_RATIO   = "icon_ratio";   // 图标占按钮直径的百分比
     public static final String K_BTN_BACK     = "btn_back";
     public static final String K_BTN_HOME     = "btn_home";
@@ -73,6 +75,9 @@ public class SettingsStore {
     public int barAlpha()       { return getInt(K_BAR_ALPHA, 96); }
     public int buttonSizeDp()   { return getInt(K_BTN_SIZE, 32); }
     /** 圆角半径（物理像素，基准 748 宽） */
+    /** 右上角圆角开关（默认开）。 */
+    public boolean cornerMaskOn() { return getBool(K_CORNER_MASK, true); }
+
     public int cornerRadius()   { return getInt(K_CORNER_R, 48); }
     /** 图标占按钮直径的百分比（30~90） */
     public int iconRatioPct()   { return getInt(K_ICON_RATIO, 46); }

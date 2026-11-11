@@ -153,7 +153,16 @@ public class MainActivity extends Activity {
             sCoverInstanceAlive = true;
         }
 
-        tryMoveToDisplay1();
+        // 🔴 兜底/悬浮层模式下**绝不能**把自己搬到外屏：
+        //    投屏镜像的是发起授权请求的那个屏，入口页在外屏 → 镜像外屏自己
+        //    → 画面无限递归（实测：满屏重复的控件条）。
+        boolean forceOverlay = getIntent() != null
+                && getIntent().getBooleanExtra("force_overlay", false);
+        if (forceOverlay) {
+            Log.i(TAG, "force_overlay: stay on current display (no move)");
+        } else {
+            tryMoveToDisplay1();
+        }
         reportDisplay();
     }
 
@@ -256,7 +265,25 @@ public class MainActivity extends Activity {
             Log.w(TAG, "pre-start foreground service failed", t);
         }
         try {
-            Intent intent = mPm.createScreenCaptureIntent();
+            // 显式绑定默认屏（内屏 display 0）来录屏。
+            // 默认行为的镜像目标跟随发起请求的 Activity 所在屏；
+            // 从外屏图标点进来时 Activity 在外屏 -> 镜像外屏自己 -> 画面无限递归。
+            // MediaProjectionConfig.createConfigForDefaultDisplay() 是 API 34 公开接口，
+            // 强制录的是 display 0，与入口页在哪无关。
+            Intent intent;
+            if (android.os.Build.VERSION.SDK_INT >= 34) {
+                try {
+                    intent = mPm.createScreenCaptureIntent(
+                            android.media.projection.MediaProjectionConfig
+                                    .createConfigForDefaultDisplay());
+                    Log.i(TAG, "capture config = default display (0)");
+                } catch (Throwable t) {
+                    Log.w(TAG, "MediaProjectionConfig failed, fallback: " + t);
+                    intent = mPm.createScreenCaptureIntent();
+                }
+            } else {
+                intent = mPm.createScreenCaptureIntent();
+            }
             startActivityForResult(intent, REQ_PROJECTION);
         } catch (Exception e) {
             Log.e(TAG, "createScreenCaptureIntent failed", e);

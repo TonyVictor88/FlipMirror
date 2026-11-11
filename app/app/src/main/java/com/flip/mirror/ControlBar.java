@@ -351,6 +351,19 @@ public class ControlBar extends FrameLayout {
      * 一旦放进 {@code TYPE_APPLICATION_OVERLAY} 的 wrap_content 窗口，
      * 这些边距会叠加进窗口尺寸，导致控件条的深色底板向下溢出几像素、压到画面内容区。
      */
+    /** 翻转模式下：只把「返回」箭头方向反过来，其它一律不动。 */
+    public void setBackArrowMirror(boolean mirror) {
+        if (mRow == null) {
+            return;
+        }
+        for (int i = 0; i < mRow.getChildCount(); i++) {
+            android.view.View v = mRow.getChildAt(i);
+            if (v instanceof IconView) {
+                ((IconView) v).setMirrorBack(mirror);
+            }
+        }
+    }
+
     public void useAsOverlay() {
         android.view.ViewGroup.LayoutParams lp = getLayoutParams();
         if (lp instanceof FrameLayout.LayoutParams) {
@@ -595,6 +608,16 @@ public class ControlBar extends FrameLayout {
         private final GradientDrawable mBg;
         private final Paint mPaint;
         private final Path mPath = new Path();
+
+        /** 返回箭头是否左右镜像（翻转模式下，后退方向要跟着反过来）。 */
+        private boolean mMirrorBack = false;
+
+        void setMirrorBack(boolean m) {
+            if (mMirrorBack != m) {
+                mMirrorBack = m;
+                invalidate();
+            }
+        }
         private final RectF mRect = new RectF();
 
         IconView(Context context, int type, int size, float boxRatio) {
@@ -683,6 +706,10 @@ public class ControlBar extends FrameLayout {
             // 缩放到 24 单位坐标系；canvas.scale 会同时缩放线宽，strokeWidth 不用改
             float s = side / 24f;
             canvas.scale(s, s);
+            // 翻转模式下把「返回」箭头左右镜像（围绕 24 单位框中心）
+            if (mMirrorBack && mType == ICON_BACK) {
+                canvas.scale(-1f, 1f, 12f, 12f);
+            }
             canvas.drawPath(mPath, mPaint);
             canvas.restoreToCount(save);
         }

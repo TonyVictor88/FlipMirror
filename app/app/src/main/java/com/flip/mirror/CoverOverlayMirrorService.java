@@ -475,8 +475,11 @@ public class CoverOverlayMirrorService extends Service {
             }
             // 控件条：位置不动，但**方向和顺序一起倒**（用户要求"四个键方向得跟着倒转"）。
             // 只转这条，不转根容器，所以它仍停在右上角原位。
-            // 控件条：位置、方向、顺序全部保持原样（V 21:23 确认：反顺序反而看着不对）。
-            // 翻转只作用于画面内容（onDraw 里的 rotate）与触摸坐标镜像（mFlipTouch）。
+            // 控件条：位置与顺序保持原样；只有「返回」箭头方向跟随翻转
+            // （用户要求：返回控件的箭头也翻个方向）。
+            if (mBar != null) {
+                mBar.setBackArrowMirror(flip);
+            }
             Log.i(TAG, "flip180 = " + flip);
         } catch (Throwable t) {
             Log.w(TAG, "applyFlip failed: " + t);

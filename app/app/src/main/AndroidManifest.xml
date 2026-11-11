@@ -6,6 +6,9 @@
     <uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
 
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!-- 关屏保活：三星会回收前台服务，持 PARTIAL 锁降低被回收概率 -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />

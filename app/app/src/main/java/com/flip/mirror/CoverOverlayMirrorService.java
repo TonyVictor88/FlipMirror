@@ -89,6 +89,15 @@ public class CoverOverlayMirrorService extends Service {
      * 画面就冻在最后一帧。所以亮屏时必须重新申请一次。
      */
     private volatile boolean mProjectionAlive = false;
+
+    /**
+     * 关屏保活用的唤醒锁。
+     *
+     * 抄的是阿田的做法（反编译它的 APK 看到 {@code Atian:ExternalDisplayWakeLock}）：
+     * 三星在关屏时会把前台服务一起回收（实测 dumpsys services 归 0），
+     * 持一把 PARTIAL 锁能显著降低被回收概率，恢复链才接得上。
+     */
+    private android.os.PowerManager.WakeLock mWakeLock;
     private android.content.BroadcastReceiver mScreenOn;
 
     /** 由 Activity 调用：带着录屏授权启动兜底渲染。 */
@@ -107,6 +116,7 @@ public class CoverOverlayMirrorService extends Service {
     public void onCreate() {
         super.onCreate();
         startForegroundWithNotification();
+        acquireWakeLock();
         showOverlay();
         registerScreenOnRecovery();
     }
@@ -146,6 +156,24 @@ public class CoverOverlayMirrorService extends Service {
      * startActivityForResult，而入口页会用 force_overlay 直接转到本服务。
      * 入口页落在哪个屏都无所谓 —— 画面是我们自己在 display 1 上画的。
      */
+    private void acquireWakeLock() {
+        try {
+            android.os.PowerManager pm =
+                    (android.os.PowerManager) getSystemService(POWER_SERVICE);
+            if (pm == null) {
+                return;
+            }
+            mWakeLock = pm.newWakeLock(
+                    android.os.PowerManager.PARTIAL_WAKE_LOCK,
+                    "FlipMirror:ExternalDisplayWakeLock");
+            mWakeLock.setReferenceCounted(false);
+            mWakeLock.acquire();
+            Log.i(TAG, "wake lock acquired");
+        } catch (Throwable t) {
+            Log.w(TAG, "acquire wake lock failed: " + t);
+        }
+    }
+
     private void registerScreenOnRecovery() {
         try {
             mScreenOn = new android.content.BroadcastReceiver() {
@@ -458,6 +486,12 @@ public class CoverOverlayMirrorService extends Service {
                 unregisterReceiver(mScreenOn);
             }
         } catch (Throwable ignored) { }
+        try {
+            if (mWakeLock != null && mWakeLock.isHeld()) {
+                mWakeLock.release();
+            }
+        } catch (Throwable ignored) { }
+        mWakeLock = null;
         mProjectionAlive = false;
         sResultCode = 0;
         sResultData = null;

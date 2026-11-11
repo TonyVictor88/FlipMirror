@@ -252,7 +252,12 @@ public class CoverOverlayMirrorService extends Service {
             mBar.setListener(new ControlBar.Listener() {
                 @Override public void onBack()    { Shell.exec("input -d 0 keyevent 4"); }
                 @Override public void onHome()    { Shell.exec("input -d 0 keyevent 3"); }
-                @Override public void onRecents() { Shell.exec("input -d 0 keyevent 187"); }
+                @Override public void onRecents() {
+                    // KEYCODE_APP_SWITCH(187) 在三星手势导航下是**无效键**（实测按下无任何变化）。
+                    // 改为直接前置 quickstep 的 RecentsActivity，实测能起多任务视图。
+                    Shell.exec("am start --display 0 -f 0x10000000 --activity-clear-top "
+                            + "-n com.sec.android.app.launcher/com.android.quickstep.RecentsActivity");
+                }
                 @Override public void onExit()    {
                     // 二次确认：悬浮层是全屏单窗口，右上角很窄，点 App 图标时容易误触。
                     // 第一次点只提示，3 秒内再点才真退出（实测误触导致"投屏自己丢了"）。

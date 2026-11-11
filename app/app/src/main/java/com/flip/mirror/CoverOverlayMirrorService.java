@@ -666,6 +666,10 @@ public class CoverOverlayMirrorService extends Service {
         private final Rect mDst = new Rect();
         private final Rect mCardRect = new Rect();
 
+        /** 右上角圆角开关（每秒刷新一次，避免每帧读偏好）。 */
+        private boolean mShowTrCorner = true;
+        private long mCornerReadAt = 0;
+
         private final TouchInjector mTouch = new TouchInjectorImpl();
 
         MirrorCanvasView(Context c) {
@@ -718,7 +722,16 @@ public class CoverOverlayMirrorService extends Service {
 
             // 只把**右上角**裁成圆角，其余三角保持直角（跟随物理屏弧线）。
             // radii 顺序：左上x,y · 右上x,y · 右下x,y · 左下x,y
-            float[] radii = new float[]{0f, 0f, CARD_RADIUS, CARD_RADIUS, 0f, 0f, 0f, 0f};
+            // 开关：每秒最多读一次偏好，关掉就四角全直角
+            long now = android.os.SystemClock.elapsedRealtime();
+            if (now - mCornerReadAt > 1000) {
+                mCornerReadAt = now;
+                try {
+                    mShowTrCorner = new SettingsStore(getContext()).cornerMaskOn();
+                } catch (Throwable ignored) { }
+            }
+            float trR = mShowTrCorner ? CARD_RADIUS : 0f;
+            float[] radii = new float[]{0f, 0f, trR, trR, 0f, 0f, 0f, 0f};
             mClip.reset();
             mClip.addRoundRect(new RectF(0, TOP_BAND, w, h), radii, Path.Direction.CW);
             canvas.save();

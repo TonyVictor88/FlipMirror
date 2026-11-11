@@ -72,6 +72,29 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** 启动后 6 秒内若服务没起来，补一次申请（最多一次）。 */
+    private void armStartupCheck(final int resultCode, final android.content.Intent data) {
+        getWindow().getDecorView().postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                if (CoverOverlayMirrorService.isRunning()) {
+                    Log.i(TAG, "startup check: service alive, finish");
+                    finish();
+                    return;
+                }
+                Log.w(TAG, "startup check: not running, retry once");
+                CoverOverlayMirrorService.start(MainActivity.this, resultCode, data);
+                getWindow().getDecorView().postDelayed(new Runnable() {
+                    @Override
+                    public void run() {
+                        Log.i(TAG, "startup check done, finish");
+                        finish();
+                    }
+                }, 3000);
+            }
+        }, 6000);
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -92,11 +115,7 @@ public class MainActivity extends Activity {
             if (!Shell.available()) {
                 return;
             }
-            Shell.execSync("cmd device_state state 4");
-            Log.i(TAG, "auto start: dual screen on, request projection");
-            try {
-                Thread.sleep(2500);
-            } catch (InterruptedException ignored) { }
+            Log.i(TAG, "auto start: request projection first");
             runOnUiThread(this::requestProjection);
         }, "entry-auto").start();
         if (getIntent() != null && getIntent().getBooleanExtra("auto_start", false)) {
@@ -300,13 +319,9 @@ public class MainActivity extends Activity {
     private void requestProjection() {
         // 先把双屏并发打开：外屏(state OFF)不亮的话，录屏授权对话框没有地方显示，
         // 流程会卡在 requestProjection 之后一动不动（实测：日志停在 on display 0，画面全黑）。
-        if (Shell.available()) {
-            boolean ok = Shell.execSync("cmd device_state state 4");
-            Log.i(TAG, "pre-enable dual screen -> " + ok);
-            try {
-                Thread.sleep(800);
-            } catch (InterruptedException ignored) { }
-        }
+        // 顺序不能反：先申请录屏，再切双屏。
+        // 先切屏会触发配置变更、销毁本 Activity，挂在上面的请求就丢了。
+        // 切双屏交给 Service 在拿到授权之后做。
         // 🔴 只有落在外屏的那个实例才能发起：本页发现不在 display 1 时会用 shell 重开一份自己，
         //    旧实例若继续申请，就会拿到第二份录屏授权、拉起第二个镜像实例，
         //    两个实例抢同一块屏幕 → 第二个报「录屏授权已失效」并把画面踢掉（实测踩过）。
@@ -374,7 +389,9 @@ public class MainActivity extends Activity {
             Log.i(TAG, "no shell channel -> overlay fallback");
             mStatus.setText("未检测到 Shizuku，改用兜底通道（可看不可触）");
             CoverOverlayMirrorService.start(this, resultCode, data);
-            finish();
+            // 不立刻 finish：留一个 6 秒观察窗。切双屏的配置变更可能打断服务启动，
+            // 观察到没起来就补一次申请 —— 这就是那 10~20% 失败率的兜底。
+            armStartupCheck(resultCode, data);
             return;
         }
 

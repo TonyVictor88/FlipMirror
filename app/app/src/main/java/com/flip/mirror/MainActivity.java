@@ -158,11 +158,11 @@ public class MainActivity extends Activity {
         //    → 画面无限递归（实测：满屏重复的控件条）。
         boolean forceOverlay = getIntent() != null
                 && getIntent().getBooleanExtra("force_overlay", false);
-        if (forceOverlay) {
-            Log.i(TAG, "force_overlay: stay on current display (no move)");
-        } else {
-            tryMoveToDisplay1();
-        }
+        // 统一入口：不管从「FlipMirror」还是「投屏到外屏」进来，
+        // 一律留在当前屏 + 走悬浮层通道。
+        // 之前保留"搬到 display 1"的老路径，两个入口行为不一致，
+        // 同时开还会互相打架（实测窗口数堆到 6）。
+        Log.i(TAG, "entry: stay on current display, use overlay channel");
         reportDisplay();
     }
 

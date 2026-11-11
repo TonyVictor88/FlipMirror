@@ -398,6 +398,13 @@ public class CoverOverlayMirrorService extends Service {
             //    之前是两个独立悬浮窗，内容窗是 fill×fill，只要它比控件条晚加/后聚焦，
             //    就会盖住控件条 —— 点上去的事件落到内容层、被当成触摸注入到内屏，
             //    表现就是"右上角四个键很难按到"（实测）。单窗口没有层级竞争。
+            // 去重：上一次的根容器若还在，先摘掉，避免叠出多个全屏窗
+            if (mRoot != null && mWm != null) {
+                try {
+                    mWm.removeView(mRoot);
+                } catch (Throwable ignored) { }
+                mRoot = null;
+            }
             mRoot = new android.widget.FrameLayout(dCtx);
             mRoot.setClipChildren(false);
             mRoot.addView(mView, new android.widget.FrameLayout.LayoutParams(

@@ -58,6 +58,18 @@ public class MainActivity extends Activity {
      * 自动准备屏幕：开机/重启后 device_state 会回到单屏，外屏是黑的，
      * 用户点图标只看到一片黑，自检也过不了。这里自动把它拉回来。
      */
+    /** 返回键：退出本页并让外屏回到首页（外屏没有系统返回，得显式拉）。 */
+    @Override
+    public void onBackPressed() {
+        Log.i(TAG, "back pressed, return to cover home");
+        try {
+            if (Shell.available()) {
+                Shell.execSync("am start --display 1 -n com.tianweixing.atianwidget/.PowerAssistActivity");
+            }
+        } catch (Throwable ignored) { }
+        finish();
+    }
+
     private void autoPrepScreen() {
         new Thread(() -> {
             try {
@@ -264,6 +276,24 @@ public class MainActivity extends Activity {
         settings.setOnClickListener(v ->
                 startActivity(new Intent(MainActivity.this, SettingsActivity.class)));
         root.addView(settings);
+
+        // 外屏没有系统返回键（按键事件被内屏吃掉），给一个显式出口
+        android.widget.Button backHome = new android.widget.Button(this);
+        styleFlat(backHome, 0xFF1B2029);
+        backHome.setText("← 返回外屏首页");
+        backHome.setAllCaps(false);
+        backHome.setLayoutParams(new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+        backHome.setOnClickListener(v -> {
+            try {
+                if (Shell.available()) {
+                    Shell.execSync("am start --display 1 -n com.tianweixing.atianwidget/.PowerAssistActivity");
+                }
+            } catch (Throwable ignored) { }
+            finish();
+        });
+        root.addView(backHome);
 
         setContentView(root);
 

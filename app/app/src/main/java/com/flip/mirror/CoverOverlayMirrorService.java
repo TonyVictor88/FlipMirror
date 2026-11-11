@@ -194,7 +194,7 @@ public class CoverOverlayMirrorService extends Service {
         // 落盘标记：告诉看门狗"用户期望正在投屏"。进程被杀也不丢。
         try {
             MirrorState.setDesired(this, true);
-            KeepAliveReceiver.schedule(this);
+            // 看门狗已按用户要求停用（不再自动恢复镜像）
         } catch (Throwable ignored) { }
         mShuttingDown = false;
         sUserExited = false;
@@ -466,9 +466,11 @@ public class CoverOverlayMirrorService extends Service {
             android.content.IntentFilter f =
                     new android.content.IntentFilter(Intent.ACTION_SCREEN_ON);
             if (Build.VERSION.SDK_INT >= 33) {
-                registerReceiver(mScreenOn, f, android.content.Context.RECEIVER_NOT_EXPORTED);
+                // 看门狗已按用户要求停用
+                // registerReceiver(mScreenOn, f, android.content.Context.RECEIVER_NOT_EXPORTED);
             } else {
-                registerReceiver(mScreenOn, f);
+                // 看门狗已停用
+                // registerReceiver(mScreenOn, f);
             }
             Log.i(TAG, "screen-on recovery registered");
         } catch (Throwable t) {
@@ -832,7 +834,7 @@ public class CoverOverlayMirrorService extends Service {
         }
         try {
             MirrorState.setDesired(this, true);
-            KeepAliveReceiver.schedule(this);
+            // 看门狗已按用户要求停用（不再自动恢复镜像）
         } catch (Throwable ignored) { }
         startBarWatchdogOnce();
     }

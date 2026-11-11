@@ -1027,8 +1027,16 @@ public class CoverOverlayMirrorService extends Service {
             // 退出二次确认提示：必须画在画面之上（Toast 会跑到内屏，看不见）
             if (mExitHintUntil > 0) {
                 if (android.os.SystemClock.elapsedRealtime() < mExitHintUntil) {
+                    // 翻转时提示也跟着倒（用户要求：反过来之后黄字也要反）
+                    if (mFlipTouch) {
+                        canvas.save();
+                        canvas.rotate(180f, w / 2f, TOP_BAND + 39f);
+                    }
                     canvas.drawRect(0, TOP_BAND, w, TOP_BAND + 78, mHintBg);
                     canvas.drawText("再点一次退出", w / 2f, TOP_BAND + 50, mHintTextCenter);
+                    if (mFlipTouch) {
+                        canvas.restore();
+                    }
                     postInvalidateDelayed(150);
                 } else {
                     mExitHintUntil = 0;

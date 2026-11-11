@@ -85,6 +85,14 @@ public class MainActivity extends Activity {
             finish();
             return;
         }
+        // 没在投屏时，从任意图标进来都直接开始 —— 用户点图标就是想投屏，
+        // 不是想看我这个设置页（之前点「FlipMirror」只弹设置页，看着像"投不上"）。
+        if (!CoverOverlayMirrorService.isRunning()
+                && (getIntent() == null
+                    || !getIntent().getBooleanExtra("auto_start", false))) {
+            Log.i(TAG, "not mirroring, auto start from FlipMirror entry");
+            requestProjection();
+        }
         ensureShizukuPermission();
 
         float d = getResources().getDisplayMetrics().density;

@@ -75,6 +75,15 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // 一进来就把外屏点亮：退出后 device_state 回到 1，外屏是关的，
+        // 这时点图标看到的是一片黑（实测：要退回外屏再点一次才亮）。
+        // 入口页不等用户按按钮，自己先把屏点亮。
+        new Thread(() -> {
+            if (Shell.available()) {
+                boolean ok = Shell.execSync("cmd device_state state 4");
+                Log.i(TAG, "entry: enable dual screen -> " + ok);
+            }
+        }, "entry-enable-ds").start();
         if (getIntent() != null && getIntent().getBooleanExtra("auto_start", false)) {
             // 看门狗/恢复路径拉起：把"用户已退出"状态复位，允许重新开始
             CoverOverlayMirrorService.clearUserExited();

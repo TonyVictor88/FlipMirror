@@ -256,7 +256,11 @@ public class SettingsActivity extends Activity {
             left.addView(s);
         }
         row.addView(left);
-        card.addView(row);
+        // 行必须占满卡片宽度：默认 wrap_content 时行宽=子项之和，
+        // 右侧开关会被挤到卡片外面（截图里只剩一条"关"字边），点也点不到。
+        card.addView(row, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
         return row;
     }
 
@@ -265,7 +269,12 @@ public class SettingsActivity extends Activity {
         Switch sw = new Switch(this);
         sw.setChecked(store.getBool(key, def));
         sw.setOnCheckedChangeListener((b, checked) -> store.setBool(key, checked));
-        row.addView(sw);
+        // 开关必须有确定宽度：之前用默认 wrap_content，被左侧带 weight 的文字挤到
+        // 屏幕外，只剩一条"关"字的边（用户反馈"开关点不动"就是它根本没显示出来）。
+        LinearLayout.LayoutParams swLp = new LinearLayout.LayoutParams(
+                Math.round(72 * density), ViewGroup.LayoutParams.WRAP_CONTENT);
+        swLp.leftMargin = Math.round(8 * density);
+        row.addView(sw, swLp);
         // 整行可点：之前只有那个小开关能点，点文字没反应（用户反馈"一堆设置点不了"）
         row.setClickable(true);
         row.setOnClickListener(v -> sw.setChecked(!sw.isChecked()));

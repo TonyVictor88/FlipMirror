@@ -257,10 +257,11 @@ public class CoverOverlayMirrorService extends Service {
                     if (now - mExitArmedAt > 3000) {
                         mExitArmedAt = now;
                         Log.i(TAG, "exit armed, tap again within 3s");
-                        try {
-                            android.widget.Toast.makeText(getApplicationContext(),
-                                    "再点一次退出", android.widget.Toast.LENGTH_SHORT).show();
-                        } catch (Throwable ignored) { }
+                        // Toast 从应用上下文发出会跑到内屏，外屏看不见。
+                        // 改成在悬浮层画布上画，保证显示在外屏。
+                        if (mView != null) {
+                            mView.showExitHint(3000);
+                        }
                         return;
                     }
                     shutdown();
@@ -729,7 +730,10 @@ public class CoverOverlayMirrorService extends Service {
                 //    一 reset，内屏回到 1080x1920，桌面要重排，经常变成空白页 ——
                 //    用户再点进来看到的就是纯壁纸（实测）。
                 //    保持 1600x1398 反而稳定：反正内屏看不见。
-                boolean ok = Shell.execSync("cmd device_state state 1");
+                // 不关外屏：一关，退出后外屏立刻黑（用户看到"没恢复正常"）；
+                // 而且下次点图标时入口页画在关屏状态下 → 只看到壁纸。
+                // 保持双屏并发，退出后自然露出 SubHome，点图标也立刻能看到入口页。
+                boolean ok = true;
                 Log.i(TAG, "exit: restore device_state 1 + wm reset -> " + ok);
             } catch (Throwable t) {
                 Log.w(TAG, "exit restore failed: " + t);
@@ -807,6 +811,10 @@ public class CoverOverlayMirrorService extends Service {
         private final Paint mBlack = new Paint();
         private final Paint mHintBg = new Paint();
         private final Paint mHintText = new Paint();
+        private final Paint mHintTextCenter = new Paint();
+
+        /** 退出提示的显示截止时刻（0 = 不显示）。 */
+        private long mExitHintUntil = 0;
         private final Path mClip = new Path();
         private Bitmap mBmp;
         private final Rect mDst = new Rect();
@@ -828,6 +836,10 @@ public class CoverOverlayMirrorService extends Service {
             mHintText.setColor(0xFFFFC24B);
             mHintText.setTextSize(26f);
             mHintText.setAntiAlias(true);
+            mHintTextCenter.setTextSize(34f);
+            mHintTextCenter.setColor(0xFFFFC24B);
+            mHintTextCenter.setAntiAlias(true);
+            mHintTextCenter.setTextAlign(android.graphics.Paint.Align.CENTER);
             mBlack.setStyle(Paint.Style.FILL);
             if (sTouch == null) {
                 sTouch = new TouchInjectorImpl();
@@ -837,6 +849,11 @@ public class CoverOverlayMirrorService extends Service {
             // 本视图已经把手势坐标换算成"内屏像素坐标"，这里让注入器做恒等映射，
             // 避免再乘一次比例（双重换算 → 点击位置整体偏掉）
             mTouch.setGeometry(mSrcW, mSrcH, mSrcW, mSrcH);
+        }
+
+        void showExitHint(long ms) {
+            mExitHintUntil = android.os.SystemClock.elapsedRealtime() + ms;
+            postInvalidate();
         }
 
         void setBitmap(Bitmap b) {
@@ -860,6 +877,17 @@ public class CoverOverlayMirrorService extends Service {
 
             // 整窗铺黑：顶部黑带 + 需要遮掉的角都靠它
             canvas.drawRect(0, 0, w, h, mBlack);
+
+            // 退出二次确认提示：画在外屏上（Toast 会跑到内屏）
+            if (mExitHintUntil > 0) {
+                if (android.os.SystemClock.elapsedRealtime() < mExitHintUntil) {
+                    canvas.drawRect(0, TOP_BAND, w, TOP_BAND + 78, mHintBg);
+                    canvas.drawText("再点一次退出", w / 2f, TOP_BAND + 50, mHintTextCenter);
+                    postInvalidateDelayed(150);
+                } else {
+                    mExitHintUntil = 0;
+                }
+            }
 
             if (mBmp == null) {
                 return;

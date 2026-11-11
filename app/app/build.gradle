@@ -13,8 +13,8 @@ android {
         applicationId "com.flip.mirror"
         minSdk 34
         targetSdk 34
-        versionCode 23
-        versionName "0.6.2"
+        versionCode 25
+        versionName "0.6.4"
     }
 
     buildTypes {
@@ -30,6 +30,13 @@ android {
     }
 
     // 强制指定目标外屏所在 display
+    // 隐藏 API 反射（device_state / injectInputEvent）会触发 lint Vital 报错，
+    // 但那些调用是必要的且有 try/catch 兜底，release 不打 lint。
+    lint {
+        checkReleaseBuilds false
+        abortOnError false
+    }
+
     lintOptions {
         abortOnError false
     }

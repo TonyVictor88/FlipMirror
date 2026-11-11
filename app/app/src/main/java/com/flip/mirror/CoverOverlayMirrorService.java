@@ -105,6 +105,9 @@ public class CoverOverlayMirrorService extends Service {
      */
     private volatile boolean mProjectionAlive = false;
 
+    /** 正在退出：看门狗不得再把控件条补回来。 */
+    private volatile boolean mShuttingDown = false;
+
     /**
      * 关屏保活用的唤醒锁。
      *
@@ -233,6 +236,9 @@ public class CoverOverlayMirrorService extends Service {
             @Override
             public void run() {
                 try {
+                    if (mShuttingDown) {
+                        return;
+                    }
                     if (mWm != null && (mBar == null || !mBar.isAttachedToWindow())) {
                         Log.w(TAG, "control bar missing, re-adding");
                         addControlBar();
@@ -585,6 +591,14 @@ public class CoverOverlayMirrorService extends Service {
     }
 
     private void shutdown() {
+        // 🔴 先停看门狗再拆视图：否则 3 秒后它发现控件条没了，会立刻补回来 ——
+        //    表现就是"点了退出、回到外屏首页，但控件条还挂在上面"（实测踩过）。
+        mShuttingDown = true;
+        try {
+            if (mBarWatchdog != null) {
+                mBarWatchdog.removeCallbacksAndMessages(null);
+            }
+        } catch (Throwable ignored) { }
         try {
             if (mBar != null && mWm != null) {
                 mWm.removeView(mBar);
@@ -595,6 +609,20 @@ public class CoverOverlayMirrorService extends Service {
                 mWm.removeView(mView);
             }
         } catch (Throwable ignored) { }
+
+        // 🔴 退出必须把双屏状态还回去：
+        //    之前只移除悬浮层、不还 device_state，外屏就停在 CONCURRENT(4) 且没有任何内容 ——
+        //    表现就是"点退出回不到外屏首页"（黑屏/悬空）。
+        new Thread(() -> {
+            try {
+                boolean ok = Shell.execSync(
+                        "cmd device_state state 1; wm size reset; wm density reset");
+                Log.i(TAG, "exit: restore device_state 1 + wm reset -> " + ok);
+            } catch (Throwable t) {
+                Log.w(TAG, "exit restore failed: " + t);
+            }
+        }, "exit-restore").start();
+
         stopSelf();
     }
 

@@ -29,12 +29,12 @@ public class SettingsActivity extends Activity {
     private static final String TAG = "FlipMirror";
 
 
-    private static final int BG          = 0xFF000000;
-    private static final int CARD        = 0xFF1C1C1E;
-    private static final int DIVIDER     = 0xFF2C2C2E;
-    private static final int TEXT_MAIN   = 0xFFFFFFFF;
-    private static final int TEXT_SUB    = 0xFF8E8E93;
-    private static final int ACCENT      = 0xFF0A84FF;
+    private static final int BG          = 0xFF0F1216;
+    private static final int CARD        = 0xFF1A1F26;
+    private static final int DIVIDER     = 0xFF272E37;
+    private static final int TEXT_MAIN   = 0xFFE8EDF3;
+    private static final int TEXT_SUB    = 0xFF9AA4B2;
+    private static final int ACCENT      = 0xFFA8C7FA;
 
     private SettingsStore store;
     private LinearLayout content;
@@ -271,8 +271,8 @@ public class SettingsActivity extends Activity {
         // 截图实测完全看不见（等于没做开关）。
         // 改成自绘开关：固定像素宽高 + 纯文字「开/关」，不依赖任何主题度量。
         final TextView sw = new TextView(this);
-        final int w = Math.round(64 * density);
-        final int h = Math.round(36 * density);
+        final int w = Math.round(56 * density);
+        final int h = Math.round(32 * density);
         sw.setLayoutParams(new LinearLayout.LayoutParams(w, h));
         sw.setGravity(android.view.Gravity.CENTER);
         sw.setTextSize(13);
@@ -281,7 +281,7 @@ public class SettingsActivity extends Activity {
             boolean on = store.getBool(key, def);
             sw.setText(on ? "开" : "关");
             android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
-            bg.setCornerRadius(8 * density);
+            bg.setCornerRadius(16 * density);
             bg.setColor(on ? 0xFF2FA84F : 0xFF4A4F57);
             sw.setBackground(bg);
         };

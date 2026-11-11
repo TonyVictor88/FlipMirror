@@ -469,6 +469,9 @@ public class CoverOverlayMirrorService extends Service {
             }
             boolean flip = new SettingsStore(this).flip180();
             mRoot.setRotation(flip ? 180f : 0f);
+            if (mView != null) {
+                mView.setFlipTouch(flip);
+            }
             Log.i(TAG, "flip180 = " + flip);
         } catch (Throwable t) {
             Log.w(TAG, "applyFlip failed: " + t);
@@ -899,6 +902,9 @@ public class CoverOverlayMirrorService extends Service {
 
         /** 是否有一次触摸手势正在进行（保证 DOWN/UP 成对，防内屏指针卡住）。 */
         private boolean mGestureActive = false;
+
+        /** 界面是否 180° 翻转（触摸坐标需要镜像）。 */
+        private boolean mFlipTouch = false;
         private final Path mClip = new Path();
         private Bitmap mBmp;
         private final Rect mDst = new Rect();
@@ -933,6 +939,11 @@ public class CoverOverlayMirrorService extends Service {
             // 本视图已经把手势坐标换算成"内屏像素坐标"，这里让注入器做恒等映射，
             // 避免再乘一次比例（双重换算 → 点击位置整体偏掉）
             mTouch.setGeometry(mSrcW, mSrcH, mSrcW, mSrcH);
+        }
+
+        /** 由服务在应用翻转时同步过来。 */
+        void setFlipTouch(boolean flip) {
+            mFlipTouch = flip;
         }
 
         void showExitHint(long ms) {
@@ -1025,6 +1036,13 @@ public class CoverOverlayMirrorService extends Service {
             // （表现：点不动、滑不动）。越界就把坐标夹到边界，事件照发。
             float vx = e.getX() - mDst.left;
             float vy = e.getY() - mDst.top;
+            // 界面翻转 180° 时，系统**只旋转绘制、不旋转触摸**（实测：
+            // 倒置后按视觉位置点图标点空，按未旋转位置点才对）。
+            // 所以这里自己把坐标镜像一次。
+            if (mFlipTouch) {
+                vx = mDst.width() - vx;
+                vy = mDst.height() - vy;
+            }
             vx = Math.max(0f, Math.min(vx, mDst.width()));
             vy = Math.max(0f, Math.min(vy, mDst.height()));
             float sx = vx * mSrcW / (float) mDst.width();

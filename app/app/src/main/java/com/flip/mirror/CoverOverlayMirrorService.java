@@ -878,16 +878,6 @@ public class CoverOverlayMirrorService extends Service {
             // 整窗铺黑：顶部黑带 + 需要遮掉的角都靠它
             canvas.drawRect(0, 0, w, h, mBlack);
 
-            // 退出二次确认提示：画在外屏上（Toast 会跑到内屏）
-            if (mExitHintUntil > 0) {
-                if (android.os.SystemClock.elapsedRealtime() < mExitHintUntil) {
-                    canvas.drawRect(0, TOP_BAND, w, TOP_BAND + 78, mHintBg);
-                    canvas.drawText("再点一次退出", w / 2f, TOP_BAND + 50, mHintTextCenter);
-                    postInvalidateDelayed(150);
-                } else {
-                    mExitHintUntil = 0;
-                }
-            }
 
             if (mBmp == null) {
                 return;
@@ -923,6 +913,17 @@ public class CoverOverlayMirrorService extends Service {
             canvas.clipPath(mClip);
             canvas.drawBitmap(mBmp, mSrcRect, mDst, mPaint);
             canvas.restore();
+        
+            // 退出二次确认提示：必须画在画面之上（Toast 会跑到内屏，看不见）
+            if (mExitHintUntil > 0) {
+                if (android.os.SystemClock.elapsedRealtime() < mExitHintUntil) {
+                    canvas.drawRect(0, TOP_BAND, w, TOP_BAND + 78, mHintBg);
+                    canvas.drawText("再点一次退出", w / 2f, TOP_BAND + 50, mHintTextCenter);
+                    postInvalidateDelayed(150);
+                } else {
+                    mExitHintUntil = 0;
+                }
+            }
         }
 
         private final Rect mSrcRect = new Rect();

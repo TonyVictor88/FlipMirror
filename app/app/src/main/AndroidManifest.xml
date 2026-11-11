@@ -1,6 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- Shizuku 授权：不声明这条，Shizuku.checkSelfPermission() 永远返回拒绝，
+         即使 adb pm grant 过也一样（运行时权限必须先声明才谈得上授予）。 -->
+    <uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
+
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />

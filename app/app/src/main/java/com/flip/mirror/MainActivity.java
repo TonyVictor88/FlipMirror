@@ -35,15 +35,47 @@ public class MainActivity extends Activity {
     private static final String TAG = "FlipMirror";
     private static final int REQ_PROJECTION = 1001;
 
-    /** 防止"重开自己"变成死循环。 */
-    private static boolean sRelaunchTried = false;
+    /** 防止"重开自己"变成死循环（每次进程生命周期最多 2 次）。 */
+    private static int sRelaunchAttempts = 0;
+
+    /** 外屏实例是否已经起来（同进程共享，用于确认后关掉 display 0 上的旧实例）。 */
+    private static volatile boolean sCoverInstanceAlive = false;
+    /** Shizuku 授权请求只弹一次 */
+    private static boolean sPermRequested = false;
 
     private MediaProjectionManager mPm;
     private TextView mStatus;
 
+    /**
+     * 主动申请 Shizuku 授权一次。
+     *
+     * 必须在界面上弹一次框：Shizuku 13.x 的授权记录存在**服务端**，
+     * 单靠 adb {@code pm grant} 只改了 Android 运行时权限，服务端仍然判为拒绝
+     * （实测：pm grant 显示 granted=true，但 checkSelfPermission() 返回 -1）。
+     * 用户点一次「允许」之后才会持久化，重装/换签名后需要重新点。
+     */
+    private void ensureShizukuPermission() {
+        try {
+            if (!rikka.shizuku.Shizuku.pingBinder()) {
+                Log.i(TAG, "shizuku server not running, skip permission request");
+                return;
+            }
+            int granted = rikka.shizuku.Shizuku.checkSelfPermission();
+            Log.i(TAG, "shizuku permission state = " + granted);
+            if (granted != 0 && !sPermRequested) {
+                sPermRequested = true;
+                rikka.shizuku.Shizuku.requestPermission(1001);
+                Log.i(TAG, "requested shizuku permission");
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "ensureShizukuPermission failed: " + t);
+        }
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        ensureShizukuPermission();
 
         float d = getResources().getDisplayMetrics().density;
         int pad = (int) (16 * d);
@@ -117,6 +149,10 @@ public class MainActivity extends Activity {
                     .postDelayed(this::requestProjection, 900);
         }
 
+        if (getDisplay() != null && getDisplay().getDisplayId() == 1) {
+            sCoverInstanceAlive = true;
+        }
+
         tryMoveToDisplay1();
         reportDisplay();
     }
@@ -137,25 +173,64 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * 确保自己在 display 1（外屏）。唯一可靠方式是 shell 执行 am start 指定 display，
-     * 且要求 exported=true + launchMode=standard。
+     * 确保自己在 display 1（外屏）。
+     *
+     * <p>唯一可靠的方式是 shell 执行 {@code am start --display 1}，但**必须带
+     * {@code -f 0x18000000}**（FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_MULTIPLE_TASK）：
+     * 否则当 display 0 上已经有本 Activity 的 task 时，系统会直接复用那个旧 task，
+     * 新窗口照样落在 display 0 —— 表现就是"点开 App 什么都没出现"（2026-11-10 实测）。</p>
+     *
+     * <p>命令里先跑 {@code cmd device_state state 4} 点亮外屏并发，再拉 Activity。
+     * 拉起来的新实例带 {@code cover=true}，它自己不会再重复搬运。</p>
      */
     private void tryMoveToDisplay1() {
         int cur = getDisplay() != null ? getDisplay().getDisplayId() : -1;
-        if (cur == 1 || sRelaunchTried) {
+        if (cur == 1) {
             return;
         }
-        sRelaunchTried = true;
+        if (sRelaunchAttempts >= 2) {
+            Log.w(TAG, "give up moving to display 1 (attempts=" + sRelaunchAttempts + ")");
+            return;
+        }
+        sRelaunchAttempts++;
+        // 清掉上一次遗留的"外屏已在"标记：否则第二次点图标时旧标记还是 true，
+        // 会在新实例还没起来时就立刻把 display 0 这个实例关掉 —— 万一这次搬运失败，
+        // 用户就什么都没有了（2026-11-10 实测：第二次点击 1ms 内就误判为已成功）。
+        sCoverInstanceAlive = false;
         // 重开自己时必须把 auto_start 一起带过去：
         // 否则落到外屏的那个新实例不知道要自动开始，一键投屏就断了（实测踩过）。
         boolean auto = getIntent() != null && getIntent().getBooleanExtra("auto_start", false);
-        final String cmd = "am start --display 1 -n com.flip.mirror/.MainActivity"
+        final String cmd = "cmd device_state state 4; sleep 1; "
+                + "am start --display 1 -f 0x18000000 -n com.flip.mirror/.MainActivity"
+                + " --ez cover true"
                 + (auto ? " --ez auto_start true" : "");
         new Thread(() -> {
-            if (Shell.execSync(cmd)) {
-                Log.i(TAG, "relaunch self on display 1 via shell");
-            } else {
-                Log.w(TAG, "shell relaunch failed: " + Shell.lastError);
+            for (int i = 0; i < 3; i++) {
+                if (Shell.execSync(cmd)) {
+                    Log.i(TAG, "relaunched self on display 1: " + cmd);
+                    // 旧实例不能留：-f 0x18000000 是强制新建 task，旧 task 会一直挂在
+                    // display 0 上，下次点图标系统又复用那个旧 task（回到原 bug），task 也越堆越多。
+                    // 但也不能无脑 finish：只在外屏实例真的起来之后才关掉自己：
+                    // 否则万一没搬成功，用户会看到"点了没反应的死 App"。
+                    for (int w = 0; w < 15 && !sCoverInstanceAlive; w++) {
+                        try {
+                            Thread.sleep(200);
+                        } catch (InterruptedException ignored) {
+                        }
+                    }
+                    if (sCoverInstanceAlive) {
+                        Log.i(TAG, "cover instance alive, finishing display-0 instance");
+                        runOnUiThread(MainActivity.this::finish);
+                    } else {
+                        Log.w(TAG, "cover instance never came up, keep this instance");
+                    }
+                    return;
+                }
+                Log.w(TAG, "relaunch attempt " + (i + 1) + " failed: " + Shell.lastError);
+                try {
+                    Thread.sleep(1500);
+                } catch (InterruptedException ignored) {
+                }
             }
         }, "relaunch-d1").start();
     }

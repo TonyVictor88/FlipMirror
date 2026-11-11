@@ -240,11 +240,10 @@ public class MainActivity extends Activity {
         // 🔴 只有落在外屏的那个实例才能发起：本页发现不在 display 1 时会用 shell 重开一份自己，
         //    旧实例若继续申请，就会拿到第二份录屏授权、拉起第二个镜像实例，
         //    两个实例抢同一块屏幕 → 第二个报「录屏授权已失效」并把画面踢掉（实测踩过）。
+        // 不再要求必须在外屏：悬浮层方案里入口页留在内屏即可，
+        // 画面由 Service 画到 display 1。留着这个守卫会导致内屏上永远不申请录屏。
         int disp = getDisplay() != null ? getDisplay().getDisplayId() : -1;
-        if (disp != 1) {
-            Log.i(TAG, "requestProjection skipped on display " + disp);
-            return;
-        }
+        Log.i(TAG, "requestProjection on display " + disp);
         if (mPm == null) {
             mStatus.setText("MediaProjectionManager 不可用");
             return;

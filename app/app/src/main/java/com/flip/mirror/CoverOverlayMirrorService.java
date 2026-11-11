@@ -92,6 +92,7 @@ public class CoverOverlayMirrorService extends Service {
     private WindowManager.LayoutParams mWmParams;
     private MirrorCanvasView mView;
     private ControlBar mBar;
+    private android.widget.FrameLayout mRoot;
     private Context mDcCtx;
     private Handler mBarWatchdog;
 
@@ -178,9 +179,9 @@ public class CoverOverlayMirrorService extends Service {
     /** 添加控件条（几何写死）。可重复调用：已存在就先移除再加，保证只有一份。 */
     private void addControlBar() {
         try {
-            if (mBar != null && mWm != null) {
+            if (mBar != null && mRoot != null) {
                 try {
-                    mWm.removeView(mBar);
+                    mRoot.removeView(mBar);
                 } catch (Throwable ignored) { }
                 mBar = null;
             }
@@ -208,19 +209,19 @@ public class CoverOverlayMirrorService extends Service {
             });
             mBar.useAsOverlay();
 
-            WindowManager.LayoutParams blp = new WindowManager.LayoutParams();
-            blp.type = Build.VERSION.SDK_INT >= 26
-                    ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-                    : WindowManager.LayoutParams.TYPE_PHONE;
-            blp.format = PixelFormat.TRANSLUCENT;
-            blp.flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                    | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
-                    | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN;
-            blp.gravity = BAR_GRAVITY;
-            blp.width = WindowManager.LayoutParams.WRAP_CONTENT;
-            blp.height = BAR_HEIGHT;
-            mWm.addView(mBar, blp);
-            Log.i(TAG, "control bar added (fixed geometry " + BAR_HEIGHT + "px)");
+            if (mRoot == null) {
+                Log.w(TAG, "root not ready, skip bar");
+                return;
+            }
+            android.widget.FrameLayout.LayoutParams blp =
+                    new android.widget.FrameLayout.LayoutParams(
+                            android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
+                            BAR_HEIGHT, BAR_GRAVITY);
+            mRoot.addView(mBar, blp);
+            try {
+                mBar.bringToFront();
+            } catch (Throwable ignored) { }
+            Log.i(TAG, "control bar added into root (height " + BAR_HEIGHT + "px)");
         } catch (Throwable t) {
             Log.w(TAG, "addControlBar failed: " + t);
         }
@@ -242,6 +243,11 @@ public class CoverOverlayMirrorService extends Service {
                     if (mWm != null && (mBar == null || !mBar.isAttachedToWindow())) {
                         Log.w(TAG, "control bar missing, re-adding");
                         addControlBar();
+                    } else if (mBar != null) {
+                        // 每拍都提一次层级，防止被后加的全屏窗盖住
+                        try {
+                            mBar.bringToFront();
+                        } catch (Throwable ignored) { }
                     }
                 } catch (Throwable ignored) { }
                 mBarWatchdog.postDelayed(this, 3000);
@@ -388,7 +394,16 @@ public class CoverOverlayMirrorService extends Service {
                 mWmParams.layoutInDisplayCutoutMode =
                         WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
             }
-            mWm.addView(mView, mWmParams);
+            // 🔴 单窗口方案：画面和控件条放进同一个悬浮窗。
+            //    之前是两个独立悬浮窗，内容窗是 fill×fill，只要它比控件条晚加/后聚焦，
+            //    就会盖住控件条 —— 点上去的事件落到内容层、被当成触摸注入到内屏，
+            //    表现就是"右上角四个键很难按到"（实测）。单窗口没有层级竞争。
+            mRoot = new android.widget.FrameLayout(dCtx);
+            mRoot.setClipChildren(false);
+            mRoot.addView(mView, new android.widget.FrameLayout.LayoutParams(
+                    android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                    android.widget.FrameLayout.LayoutParams.MATCH_PARENT));
+            mWm.addView(mRoot, mWmParams);
 
             addControlBar();
 
@@ -600,13 +615,14 @@ public class CoverOverlayMirrorService extends Service {
             }
         } catch (Throwable ignored) { }
         try {
-            if (mBar != null && mWm != null) {
-                mWm.removeView(mBar);
+            if (mBar != null && mRoot != null) {
+                mRoot.removeView(mBar);
             }
         } catch (Throwable ignored) { }
         try {
-            if (mView != null && mWm != null) {
-                mWm.removeView(mView);
+            if (mRoot != null && mWm != null) {
+                mWm.removeView(mRoot);
+                mRoot = null;
             }
         } catch (Throwable ignored) { }
 
@@ -631,13 +647,14 @@ public class CoverOverlayMirrorService extends Service {
         // 🔴 必须移除悬浮 View：服务被系统回收后 View 仍挂在窗口上，
         //    下次启动会再叠一层 —— 画面出现重影/两份状态栏（实测踩过）。
         try {
-            if (mBar != null && mWm != null) {
-                mWm.removeView(mBar);
+            if (mBar != null && mRoot != null) {
+                mRoot.removeView(mBar);
             }
         } catch (Throwable ignored) { }
         try {
-            if (mView != null && mWm != null) {
-                mWm.removeView(mView);
+            if (mRoot != null && mWm != null) {
+                mWm.removeView(mRoot);
+                mRoot = null;
             }
         } catch (Throwable ignored) { }
         mBar = null;

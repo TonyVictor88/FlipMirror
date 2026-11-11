@@ -63,8 +63,21 @@ public class CoverOverlayMirrorService extends Service {
     /** 外屏内容区尺寸（与主通道同口径） */
     private static final int CONTENT_W = 748;
     private static final int CONTENT_H = 654;
-    /** 顶部黑带（状态栏位置） */
+    /** 顶部黑带（状态栏位置）—— 写死，不参与任何比例换算 */
     private static final int TOP_BAND = 66;
+
+    /**
+     * 控件条几何——全部写死。
+     *
+     * 之前这些值是按 density / 屏宽比例算的，换一档 DPI 或换一个构造路径就会漂，
+     * 表现为"控件条不见了 / 跑到别处"。外屏物理尺寸固定 748×720，直接写死最稳。
+     */
+    private static final int BAR_HEIGHT = 66;      // 正好等于顶部黑带
+    private static final int BAR_GRAVITY = Gravity.TOP | Gravity.END;
+
+    /** 圆角卡片：四周内缩（露出黑边）与圆角半径，全部写死 */
+    private static final int EDGE_INSET = 8;
+    private static final float CARD_RADIUS = 48f;
 
     // 录屏授权从 Activity 传进来（同进程静态传递）
     private static int sResultCode = 0;
@@ -79,6 +92,8 @@ public class CoverOverlayMirrorService extends Service {
     private WindowManager.LayoutParams mWmParams;
     private MirrorCanvasView mView;
     private ControlBar mBar;
+    private Context mDcCtx;
+    private Handler mBarWatchdog;
 
     private int mSrcW = 1080, mSrcH = 1920;   // 内屏实际像素（只用于等比缩放）
 
@@ -118,6 +133,7 @@ public class CoverOverlayMirrorService extends Service {
         startForegroundWithNotification();
         acquireWakeLock();
         showOverlay();
+        startBarWatchdog();
         registerScreenOnRecovery();
     }
 
@@ -156,6 +172,78 @@ public class CoverOverlayMirrorService extends Service {
      * startActivityForResult，而入口页会用 force_overlay 直接转到本服务。
      * 入口页落在哪个屏都无所谓 —— 画面是我们自己在 display 1 上画的。
      */
+    /** 添加控件条（几何写死）。可重复调用：已存在就先移除再加，保证只有一份。 */
+    private void addControlBar() {
+        try {
+            if (mBar != null && mWm != null) {
+                try {
+                    mWm.removeView(mBar);
+                } catch (Throwable ignored) { }
+                mBar = null;
+            }
+            if (mDcCtx == null) {
+                DisplayManager dm = (DisplayManager) getSystemService(DISPLAY_SERVICE);
+                Display d1 = dm == null ? null : dm.getDisplay(1);
+                if (d1 == null || mWm == null) {
+                    return;
+                }
+                mDcCtx = createDisplayContext(d1);
+            }
+            if (mWm == null) {
+                return;
+            }
+            mBar = new ControlBar(new android.view.ContextThemeWrapper(
+                    mDcCtx, android.R.style.Theme_DeviceDefault));
+            mBar.setCollapseButtonAsExit(true);
+            mBar.setListener(new ControlBar.Listener() {
+                @Override public void onBack()    { Shell.exec("input -d 0 keyevent 4"); }
+                @Override public void onHome()    { Shell.exec("input -d 0 keyevent 3"); }
+                @Override public void onRecents() { Shell.exec("input -d 0 keyevent 187"); }
+                @Override public void onExit()    { shutdown(); }
+                @Override public void onCollapse() { }
+                @Override public void onExpand()   { }
+            });
+            mBar.useAsOverlay();
+
+            WindowManager.LayoutParams blp = new WindowManager.LayoutParams();
+            blp.type = Build.VERSION.SDK_INT >= 26
+                    ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                    : WindowManager.LayoutParams.TYPE_PHONE;
+            blp.format = PixelFormat.TRANSLUCENT;
+            blp.flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                    | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+                    | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN;
+            blp.gravity = BAR_GRAVITY;
+            blp.width = WindowManager.LayoutParams.WRAP_CONTENT;
+            blp.height = BAR_HEIGHT;
+            mWm.addView(mBar, blp);
+            Log.i(TAG, "control bar added (fixed geometry " + BAR_HEIGHT + "px)");
+        } catch (Throwable t) {
+            Log.w(TAG, "addControlBar failed: " + t);
+        }
+    }
+
+    /**
+     * 自愈：每 3 秒确认控件条窗口还在，掉了就补。
+     * 用户要求"写死再也不要动" —— 那就不靠任何一次性初始化，掉了自动回来。
+     */
+    private void startBarWatchdog() {
+        mBarWatchdog = new Handler(getMainLooper());
+        mBarWatchdog.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    if (mWm != null && (mBar == null || !mBar.isAttachedToWindow())) {
+                        Log.w(TAG, "control bar missing, re-adding");
+                        addControlBar();
+                    }
+                } catch (Throwable ignored) { }
+                mBarWatchdog.postDelayed(this, 3000);
+            }
+        }, 3000);
+        Log.i(TAG, "bar watchdog started");
+    }
+
     /** 重新读取内屏真实像素（改过 wm size 之后必须重读）。 */
     private void refreshSrcSize() {
         try {
@@ -257,6 +345,7 @@ public class CoverOverlayMirrorService extends Service {
                 return;
             }
             Context dCtx = createDisplayContext(d1);
+            mDcCtx = dCtx;
             mWm = (WindowManager) dCtx.getSystemService(WINDOW_SERVICE);
             if (mWm == null) {
                 stopSelf();
@@ -295,31 +384,7 @@ public class CoverOverlayMirrorService extends Service {
             }
             mWm.addView(mView, mWmParams);
 
-            // 控件条（浮在画面之上）
-            mBar = new ControlBar(new android.view.ContextThemeWrapper(
-                    dCtx, android.R.style.Theme_DeviceDefault));
-            mBar.setCollapseButtonAsExit(true);
-            mBar.setListener(new ControlBar.Listener() {
-                @Override public void onBack()    { Shell.exec("input -d 0 keyevent 4"); }
-                @Override public void onHome()    { Shell.exec("input -d 0 keyevent 3"); }
-                @Override public void onRecents() { Shell.exec("input -d 0 keyevent 187"); }
-                @Override public void onExit()    { shutdown(); }
-                @Override public void onCollapse() { }
-                @Override public void onExpand()   { }
-            });
-
-            WindowManager.LayoutParams blp = new WindowManager.LayoutParams();
-            blp.type = mWmParams.type;
-            blp.format = PixelFormat.TRANSLUCENT;
-            blp.flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                    | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
-                    | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN;
-            blp.gravity = Gravity.TOP | Gravity.END;
-            blp.width = WindowManager.LayoutParams.WRAP_CONTENT;
-            blp.height = Math.max(1, Math.round(TOP_BAND
-                    * (dCtx.getResources().getDisplayMetrics().density / (340f / 160f))));
-            mBar.useAsOverlay();
-            mWm.addView(mBar, blp);
+            addControlBar();
 
             Log.i(TAG, "overlay mirror shown on display 1 (src=" + mSrcW + "x" + mSrcH + ")");
         } catch (Throwable t) {
@@ -631,47 +696,36 @@ public class CoverOverlayMirrorService extends Service {
             int w = getWidth();
             int h = getHeight();
 
-            // 整块窗口先铺黑：内容按圆角裁掉四角后，露出来的是黑色而不是底下的壁纸，
-            // 圆角才"看得出来"（只裁不铺黑时，四角透出壁纸，看着像没遮罩）。
+            // ① 整窗铺黑：圆角卡片之外露出来的就是这块黑，遮罩才"看得出形状"
             canvas.drawRect(0, 0, w, h, mBlack);
 
             if (mBmp == null) {
                 return;
             }
 
-            // 内容区：**铺满裁切**（取较大的缩放比），宁可裁边也不留透明边。
-            // 之前用 Math.min（等比适应）会在比例不一致时露出底下的壁纸，看着像"没撑满"。
-            float availW = w;
-            float availH = h - TOP_BAND;
+            // ② 内容区 = 扣掉顶部黑带 + 四周内缩一圈，形成"圆角矩形卡片"
+            float availW = w - 2 * EDGE_INSET;
+            float availH = h - TOP_BAND - 2 * EDGE_INSET;
+            if (availW <= 0 || availH <= 0) {
+                return;
+            }
+
+            // ③ 卡片内部铺满裁切（宁可裁边，也不留透明缝）
             float scale = Math.max(availW / mBmp.getWidth(), availH / mBmp.getHeight());
             int dw = Math.round(mBmp.getWidth() * scale);
             int dh = Math.round(mBmp.getHeight() * scale);
-            int left = Math.round((availW - dw) / 2f);
-            int top = TOP_BAND + Math.round((availH - dh) / 2f);
-
+            int left = EDGE_INSET + Math.round((availW - dw) / 2f);
+            int top = TOP_BAND + EDGE_INSET + Math.round((availH - dh) / 2f);
             mDst.set(left, top, left + dw, top + dh);
             mSrcRect.set(0, 0, mBmp.getWidth(), mBmp.getHeight());
 
-            // 圆角半径用**物理屏实测值**换算，不要用比例猜：
-            // 外屏 dumpsys RoundedCorners radius=49（748 基准），
-            // 而本窗口带 FLAG_LAYOUT_NO_LIMITS，getWidth() 可能比屏幕大，
-            // 用比例算会把圆角推到屏幕外 —— 表现就是"圆角不见了"。
-            float r = 49f * (Math.min(w, 748f) / 748f);
-            Log.i(TAG, "draw: view=" + w + "x" + h + " radius=" + r);
+            // ④ 圆角卡片：半径写死 48（外屏 748 基准），裁内容后四角露出黑底
             mClip.reset();
-            mClip.addRoundRect(new RectF(0, 0, w, h), r, r, Path.Direction.CW);
+            mClip.addRoundRect(new RectF(mDst), CARD_RADIUS, CARD_RADIUS, Path.Direction.CW);
             canvas.save();
             canvas.clipPath(mClip);
             canvas.drawBitmap(mBmp, mSrcRect, mDst, mPaint);
             canvas.restore();
-
-            // 触摸不可用时明确写出来：注入需要 shell（InputManager.injectInputEvent），
-            // 兜底通道只保证看得见，不保证点得动。用户必须知道这一点。
-            if (!Shell.available()) {
-                float ty = h - 14;
-                canvas.drawRect(0, ty - 34, w, h, mHintBg);
-                canvas.drawText("兜底模式：可看不可触（Shizuku 未运行）", 16, ty - 8, mHintText);
-            }
         }
 
         private final Rect mSrcRect = new Rect();

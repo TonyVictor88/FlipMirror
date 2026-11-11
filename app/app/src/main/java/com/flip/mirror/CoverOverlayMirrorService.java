@@ -631,8 +631,9 @@ public class CoverOverlayMirrorService extends Service {
             int w = getWidth();
             int h = getHeight();
 
-            // 顶部黑带
-            canvas.drawRect(0, 0, w, TOP_BAND, mBlack);
+            // 整块窗口先铺黑：内容按圆角裁掉四角后，露出来的是黑色而不是底下的壁纸，
+            // 圆角才"看得出来"（只裁不铺黑时，四角透出壁纸，看着像没遮罩）。
+            canvas.drawRect(0, 0, w, h, mBlack);
 
             if (mBmp == null) {
                 return;
@@ -651,9 +652,12 @@ public class CoverOverlayMirrorService extends Service {
             mDst.set(left, top, left + dw, top + dh);
             mSrcRect.set(0, 0, mBmp.getWidth(), mBmp.getHeight());
 
-            // 整块窗口裁圆角：物理外屏 r=49px（dumpsys RoundedCorners 实测），
-            // 只裁内容矩形的话，四角会露出底下的壁纸，也是"遮罩不对"的来源之一。
-            float r = Math.min(w, h) * 0.068f;
+            // 圆角半径用**物理屏实测值**换算，不要用比例猜：
+            // 外屏 dumpsys RoundedCorners radius=49（748 基准），
+            // 而本窗口带 FLAG_LAYOUT_NO_LIMITS，getWidth() 可能比屏幕大，
+            // 用比例算会把圆角推到屏幕外 —— 表现就是"圆角不见了"。
+            float r = 49f * (Math.min(w, 748f) / 748f);
+            Log.i(TAG, "draw: view=" + w + "x" + h + " radius=" + r);
             mClip.reset();
             mClip.addRoundRect(new RectF(0, 0, w, h), r, r, Path.Direction.CW);
             canvas.save();

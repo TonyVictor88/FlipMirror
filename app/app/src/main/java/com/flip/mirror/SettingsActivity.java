@@ -3,6 +3,8 @@ package com.flip.mirror;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.graphics.Color;
+import android.graphics.Paint;
+import android.graphics.Canvas;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.util.Log;
@@ -281,8 +283,8 @@ public class SettingsActivity extends Activity {
             boolean on = store.getBool(key, def);
             sw.setText(on ? "开" : "关");
             android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
-            bg.setCornerRadius(16 * density);
-            bg.setColor(on ? 0xFF57C77E : 0xFF3A4149);
+            bg.setCornerRadius(10 * density);
+            bg.setColor(on ? 0xFF4BC16D : 0xFF2F363F);
             sw.setBackground(bg);
         };
         paint.run();
@@ -314,7 +316,7 @@ public class SettingsActivity extends Activity {
         wrap.setPadding(Math.round(16 * density), 0, Math.round(16 * density), Math.round(10 * density));
         card.addView(wrap);
 
-        SeekBar sb = new SeekBar(this);
+        SeekBar sb = new ModernSeek(this);
         sb.setMax(max - min);
         sb.setProgress(Math.max(0, Math.min(max - min, store.getInt(key, def) - min)));
         sb.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
@@ -403,5 +405,44 @@ public class SettingsActivity extends Activity {
                 })
                 .setNegativeButton("取消", null)
                 .show();
+    }
+
+    /** 细轨道 + 圆形滑块的 SeekBar（系统默认是方头，看着旧）。 */
+    private static class ModernSeek extends SeekBar {
+        private final Paint track = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint prog = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint thumb = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final float density;
+
+        ModernSeek(android.content.Context c) {
+            super(c);
+            density = c.getResources().getDisplayMetrics().density;
+            track.setColor(0xFF2B323B);
+            prog.setColor(0xFFA8C7FA);
+            thumb.setColor(0xFFE8EDF3);
+            setSplitTrack(false);
+            setBackground(null);
+            if (android.os.Build.VERSION.SDK_INT >= 16) {
+                setProgressDrawable(null);
+                setThumb(null);
+            }
+        }
+
+        @Override
+        protected synchronized void onDraw(android.graphics.Canvas cv) {
+            float w = getWidth();
+            float cy = getHeight() / 2f;
+            float th = 6 * density;       // 轨道厚
+            float tr = th / 2f;
+            float r  = 9 * density;       // 滑块半径
+            float left = r, right = w - r;
+            if (right <= left) return;
+
+            cv.drawRoundRect(left, cy - tr, right, cy + tr, tr, tr, track);
+            float t = getMax() == 0 ? 0f : (float) getProgress() / getMax();
+            float px = left + (right - left) * t;
+            cv.drawRoundRect(left, cy - tr, px, cy + tr, tr, tr, prog);
+            cv.drawCircle(px, cy, r, thumb);
+        }
     }
 }

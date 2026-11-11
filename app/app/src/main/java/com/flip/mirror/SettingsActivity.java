@@ -43,26 +43,10 @@ public class SettingsActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        // 和入口页同样的处理：从外屏点进来时如果落在内屏，外屏什么都看不到。
-        // 把自己复制一份到 display 1 再结束本实例。
-        new Thread(() -> {
-            try {
-                if (!Shell.available()) {
-                    return;
-                }
-                Shell.execSync("cmd device_state state 4");
-                int disp = getDisplay() != null ? getDisplay().getDisplayId() : -1;
-                Log.i(TAG, "settings on display " + disp);
-                if (disp != 1) {
-                    boolean ok = Shell.execSync(
-                            "am start --display 1 -f 0x18000000 -n com.flip.mirror/.SettingsActivity");
-                    Log.i(TAG, "settings relaunch on display 1 -> " + ok);
-                    if (ok) {
-                        runOnUiThread(this::finish);
-                    }
-                }
-            } catch (Throwable ignored) { }
-        }, "settings-display").start();
+        // 已移除：以前这里会 exec `cmd device_state state 4` 并把本页复制到 display 1。
+        // 但从入口页点「设置」时本来就已经在外屏，再切一次双屏会触发配置变更把本页顶掉，
+        // 用户看到的就是"点设置卡在壁纸"（实测）。
+        // 设置页现在就地显示，不碰屏幕状态、不复制自己。
         store = new SettingsStore(this);
 
         float d = getResources().getDisplayMetrics().density;

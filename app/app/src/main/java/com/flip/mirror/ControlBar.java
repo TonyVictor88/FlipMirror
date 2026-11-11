@@ -134,7 +134,9 @@ public class ControlBar extends FrameLayout {
         float d = getResources().getDisplayMetrics().density;
         // 按钮直径 / 图标比例 / 显示哪些按钮 / 是否显示网速 —— 全部来自设置
         mStore = new SettingsStore(context);
-        mBtnSize = Math.round(mStore.buttonSizeDp() * d);
+        // 外屏很小，按 32dp 算出来只有 ~56px（约 4mm），手指点不准。
+        // 给一个像素下限，保证每个按钮至少 96px（≈1cm 以上）。
+        mBtnSize = Math.max(96, Math.round(mStore.buttonSizeDp() * d));
         mIconRatio = Math.max(0.30f, Math.min(0.90f, mStore.iconRatioPct() / 100f));
         // 网速改由 MirrorActivity 画在顶部状态栏区（黑带左侧），控件条只负责按钮
         mShowSpeed = false;
@@ -351,6 +353,11 @@ public class ControlBar extends FrameLayout {
      * 一旦放进 {@code TYPE_APPLICATION_OVERLAY} 的 wrap_content 窗口，
      * 这些边距会叠加进窗口尺寸，导致控件条的深色底板向下溢出几像素、压到画面内容区。
      */
+    /** 控件条的自然高度（= 上下内边距 + 一个按钮），供服务按实际高度留黑带。 */
+    public int contentHeight() {
+        return mExpandedH;
+    }
+
     public void useAsOverlay() {
         android.view.ViewGroup.LayoutParams lp = getLayoutParams();
         if (lp instanceof FrameLayout.LayoutParams) {
@@ -574,6 +581,15 @@ public class ControlBar extends FrameLayout {
      * 图标全部用 Path 在 24x24 坐标系内绘制，随控件尺寸等比缩放。</p>
      */
     private static final class IconView extends View {
+
+        /** 点击热区比图标大 12dp —— 外屏很小，图标 32dp 用手指点经常点偏。 */
+        @Override
+        public void getHitRect(android.graphics.Rect outRect) {
+            super.getHitRect(outRect);
+            int pad = Math.round(12 * getResources().getDisplayMetrics().density);
+            outRect.inset(-pad, -pad);
+        }
+
 
         /** 24 单位坐标系内的线宽。 */
         private static final float ICON_STROKE = 2.2f;

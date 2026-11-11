@@ -64,7 +64,13 @@ public class CoverOverlayMirrorService extends Service {
     private static final int CONTENT_W = 748;
     private static final int CONTENT_H = 654;
     /** 顶部黑带（状态栏位置）—— 写死，不参与任何比例换算 */
-    private static final int TOP_BAND = 66;
+    /**
+     * 顶部黑带高度。**不能写死**：控件条按钮是 32dp，按下 480dpi 是 96px，
+     * 加上内边距条高约 132px。以前写死 66px，按钮被裁掉一半 ——
+     * 这就是"右上角 4 个控件不灵敏 / 有时点空"的直接原因。
+     * 现在由控件条实际高度决定，画面内容从它下面开始。
+     */
+    private volatile int mTopBand = 66;
 
     /**
      * 控件条几何——全部写死。
@@ -281,12 +287,23 @@ public class CoverOverlayMirrorService extends Service {
             android.widget.FrameLayout.LayoutParams blp =
                     new android.widget.FrameLayout.LayoutParams(
                             android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
-                            BAR_HEIGHT, BAR_GRAVITY);
+                            android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
+                            BAR_GRAVITY);
             mRoot.addView(mBar, blp);
             try {
                 mBar.bringToFront();
             } catch (Throwable ignored) { }
-            Log.i(TAG, "control bar added into root (height " + BAR_HEIGHT + "px)");
+            mBar.post(() -> {
+                int h = mBar.getHeight();
+                if (h > 0) {
+                    mTopBand = h;
+                    Log.i(TAG, "top band follows bar height: " + h + "px");
+                    if (mView != null) {
+                        mView.requestLayout();
+                        mView.invalidate();
+                    }
+                }
+            });
         } catch (Throwable t) {
             Log.w(TAG, "addControlBar failed: " + t);
         }
@@ -854,6 +871,9 @@ public class CoverOverlayMirrorService extends Service {
 
         /** 退出提示的显示截止时刻（0 = 不显示）。 */
         private long mExitHintUntil = 0;
+
+        /** 当前是否有一次触摸手势正在进行（保证 DOWN/UP 成对，避免内屏指针卡住）。 */
+        private boolean mGestureActive = false;
         private final Path mClip = new Path();
         private Bitmap mBmp;
         private final Rect mDst = new Rect();
@@ -927,12 +947,12 @@ public class CoverOverlayMirrorService extends Service {
             // 内容铺满到边（不留内缩）：物理屏左/下/右下本来就带圆角，
             // 只有"右上角"在顶部黑带与画面交界处会露出直角，需要单独补。
             float availW = w;
-            float availH = h - TOP_BAND;
+            float availH = h - mTopBand;
             float scale = Math.max(availW / mBmp.getWidth(), availH / mBmp.getHeight());
             int dw = Math.round(mBmp.getWidth() * scale);
             int dh = Math.round(mBmp.getHeight() * scale);
             int left = Math.round((availW - dw) / 2f);
-            int top = TOP_BAND + Math.round((availH - dh) / 2f);
+            int top = mTopBand + Math.round((availH - dh) / 2f);
             mDst.set(left, top, left + dw, top + dh);
             mSrcRect.set(0, 0, mBmp.getWidth(), mBmp.getHeight());
 
@@ -949,7 +969,7 @@ public class CoverOverlayMirrorService extends Service {
             float trR = mShowTrCorner ? CARD_RADIUS : 0f;
             float[] radii = new float[]{0f, 0f, trR, trR, 0f, 0f, 0f, 0f};
             mClip.reset();
-            mClip.addRoundRect(new RectF(0, TOP_BAND, w, h), radii, Path.Direction.CW);
+            mClip.addRoundRect(new RectF(0, mTopBand, w, h), radii, Path.Direction.CW);
             canvas.save();
             canvas.clipPath(mClip);
             canvas.drawBitmap(mBmp, mSrcRect, mDst, mPaint);
@@ -958,8 +978,8 @@ public class CoverOverlayMirrorService extends Service {
             // 退出二次确认提示：必须画在画面之上（Toast 会跑到内屏，看不见）
             if (mExitHintUntil > 0) {
                 if (android.os.SystemClock.elapsedRealtime() < mExitHintUntil) {
-                    canvas.drawRect(0, TOP_BAND, w, TOP_BAND + 78, mHintBg);
-                    canvas.drawText("再点一次退出", w / 2f, TOP_BAND + 50, mHintTextCenter);
+                    canvas.drawRect(0, mTopBand, w, mTopBand + 78, mHintBg);
+                    canvas.drawText("再点一次退出", w / 2f, mTopBand + 50, mHintTextCenter);
                     postInvalidateDelayed(150);
                 } else {
                     mExitHintUntil = 0;
@@ -975,24 +995,35 @@ public class CoverOverlayMirrorService extends Service {
                 return true;
             }
             // 画面坐标 → 内屏坐标
+            // 注意：这里**不能**因为手指滑出画面区就直接 return。
+            // 以前那样做，UP 事件会丢，内屏认为手指一直按着 →
+            // 之后所有点击/滑动都被当成同一次手势的延续（表现为"有时候点不动、滑不动"）。
             float vx = e.getX() - mDst.left;
             float vy = e.getY() - mDst.top;
-            if (vx < 0 || vy < 0 || vx > mDst.width() || vy > mDst.height()) {
-                return true;
-            }
+            // 越界就夹到边界，保证坐标合法但事件照发
+            vx = Math.max(0f, Math.min(vx, mDst.width()));
+            vy = Math.max(0f, Math.min(vy, mDst.height()));
             float sx = vx * mSrcW / (float) mDst.width();
             float sy = vy * mSrcH / (float) mDst.height();
 
             switch (e.getActionMasked()) {
                 case MotionEvent.ACTION_DOWN:
+                    mGestureActive = true;
                     mTouch.send(sx, sy, MotionEvent.ACTION_DOWN);
                     break;
                 case MotionEvent.ACTION_MOVE:
-                    mTouch.send(sx, sy, MotionEvent.ACTION_MOVE);
+                    if (mGestureActive) {
+                        mTouch.send(sx, sy, MotionEvent.ACTION_MOVE);
+                    }
                     break;
+                case MotionEvent.ACTION_POINTER_DOWN:
+                case MotionEvent.ACTION_POINTER_UP:
                 case MotionEvent.ACTION_UP:
                 case MotionEvent.ACTION_CANCEL:
-                    mTouch.send(sx, sy, MotionEvent.ACTION_UP);
+                    if (mGestureActive) {
+                        mGestureActive = false;
+                        mTouch.send(sx, sy, MotionEvent.ACTION_UP);
+                    }
                     break;
                 default:
                     break;

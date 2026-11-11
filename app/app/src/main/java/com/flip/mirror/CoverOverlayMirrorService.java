@@ -455,6 +455,9 @@ public class CoverOverlayMirrorService extends Service {
             mRoot.addView(mView, new android.widget.FrameLayout.LayoutParams(
                     android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
                     android.widget.FrameLayout.LayoutParams.MATCH_PARENT));
+            // 先透明挂上：启动过程中会改 wm size / 点亮外屏，画面会重排几下，
+            // 直接可见就会"来回跳"（实测）。等第一帧到了再显示。
+            mRoot.setAlpha(0f);
             mWm.addView(mRoot, mWmParams);
 
             addControlBar();
@@ -792,6 +795,10 @@ public class CoverOverlayMirrorService extends Service {
         }
 
         void setBitmap(Bitmap b) {
+            if (mRoot != null && mRoot.getAlpha() < 1f) {
+                mRoot.setAlpha(1f);
+                Log.i(TAG, "first frame, overlay visible");
+            }
             Bitmap old = mBmp;
             mBmp = b;
             invalidate();

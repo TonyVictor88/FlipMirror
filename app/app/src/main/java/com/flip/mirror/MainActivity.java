@@ -79,9 +79,21 @@ public class MainActivity extends Activity {
         // 这时点图标看到的是一片黑（实测：要退回外屏再点一次才亮）。
         // 入口页不等用户按按钮，自己先把屏点亮。
         new Thread(() -> {
-            if (Shell.available()) {
-                boolean ok = Shell.execSync("cmd device_state state 4");
-                Log.i(TAG, "entry: enable dual screen -> " + ok);
+            if (!Shell.available()) {
+                return;
+            }
+            Shell.execSync("cmd device_state state 4");
+            // 关键：如果本实例落在内屏(0)，外屏根本看不到入口页（只有壁纸）。
+            // 显式把自己复制一份到 display 1，然后结束本实例。
+            int disp = getDisplay() != null ? getDisplay().getDisplayId() : -1;
+            Log.i(TAG, "entry on display " + disp);
+            if (disp != 1) {
+                boolean ok = Shell.execSync(
+                        "am start --display 1 -f 0x18000000 -n com.flip.mirror/.MainActivity");
+                Log.i(TAG, "entry: relaunch on display 1 -> " + ok);
+                if (ok) {
+                    runOnUiThread(this::finish);
+                }
             }
         }, "entry-enable-ds").start();
         if (getIntent() != null && getIntent().getBooleanExtra("auto_start", false)) {

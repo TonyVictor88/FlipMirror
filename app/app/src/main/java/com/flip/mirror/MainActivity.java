@@ -90,11 +90,10 @@ public class MainActivity extends Activity {
         if (!CoverOverlayMirrorService.isRunning()
                 && (getIntent() == null
                     || !getIntent().getBooleanExtra("auto_start", false))) {
-            Log.i(TAG, "not mirroring, auto start from FlipMirror entry");
-            // 不能在 onCreate 里直接 startActivityForResult：Activity 还没 resumed 时
-            // 请求可能被系统丢掉（实测：日志有 auto start，但没有 projection granted）。
-            // 推到 resumed 后再走，并给窗口一点时间。
-            getWindow().getDecorView().postDelayed(this::requestProjection, 500);
+            // 用户要求（2026-11-11 13:51）：从外屏点图标**只进入本界面**，不自动开始投屏。
+            // 停在入口页，由用户自己按「开始镜像到外屏」。这样三个按钮（自检 / 开始 / 设置）
+            // 都能点到；自动开投会直接把界面顶掉。
+            Log.i(TAG, "entry page shown, wait for user to start");
         }
         ensureShizukuPermission();
 

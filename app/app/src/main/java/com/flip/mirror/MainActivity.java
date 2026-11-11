@@ -589,13 +589,12 @@ public class MainActivity extends Activity {
             // ③ 双屏并发 + 内屏尺寸
             boolean dualOk = false;
             if (shizukuOk) {
+                // 自检必须**只读**：以前这里会 cmd device_state state 4 + wm size，
+                // 一改屏幕状态就触发配置变更、Activity 被重建，用户看到的是死掉的旧页面
+                // （反馈：点完自检按钮就都点不动了）。改成只读查询。
                 try {
-                    dualOk = Shell.execSync("cmd device_state state 4");
-                } catch (Throwable ignored) { }
-                try {
-                    SettingsStore st = new SettingsStore(this);
-                    Shell.execSync("wm size " + st.innerWidth() + "x" + st.innerHeight());
-                    Shell.execSync("wm density " + st.innerDpi());
+                    // execSync 只返回成败；能读到 wm size 就说明 Shizuku 通道可用
+                    dualOk = Shell.execSync("wm size");
                 } catch (Throwable ignored) { }
             }
             allOk &= dualOk;

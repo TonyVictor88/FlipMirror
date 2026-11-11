@@ -735,9 +735,12 @@ public class CoverOverlayMirrorService extends Service {
             // 录屏可能绑到外屏自己（748x720 那种），结果是"对着镜子拍镜子"：
             // 画面里出现我们自己的控件条，无限嵌套。
             // 判据：宽度接近外屏宽度（而不是内屏），就判定抓错了，自动重申请一次。
+            // ⚠️ 已停用自动重申请：它会 startActivity 再走一遍流程，
+            // 服务被重建后 mRestarted 复位 → 可能反复重启（表现为"打不开"）。
+            // 只在日志里标注，便于人工发现；恢复交给用户点一次 ✕ 再进。
             if (looksLikeCoverCapture(capW, capH)) {
-                Log.w(TAG, "capture looks like cover (" + capW + "x" + capH + ") -> restart");
-                restartProjectionOnce();
+                Log.w(TAG, "capture looks like cover (" + capW + "x" + capH
+                        + "), suggest exiting and re-entering");
             }
         } catch (Throwable t) {
             Log.e(TAG, "startProjection failed", t);

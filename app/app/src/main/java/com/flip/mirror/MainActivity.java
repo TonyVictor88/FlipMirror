@@ -95,9 +95,22 @@ public class MainActivity extends Activity {
         }, 6000);
     }
 
+    /** 落盘标记：按下开始后需要"切屏→重建→再申请"接力。 */
+    private static final String PREFS_UI = "flipmirror_ui";
+    private static final String K_PENDING_START = "pending_start";
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // 若上次按下"开始镜像"后促成了切屏，重建完这里接着申请
+        try {
+            if (getSharedPreferences(PREFS_UI, MODE_PRIVATE).getBoolean(K_PENDING_START, false)) {
+                getSharedPreferences(PREFS_UI, MODE_PRIVATE).edit()
+                        .putBoolean(K_PENDING_START, false).apply();
+                Log.i(TAG, "pending start: request projection now");
+                getWindow().getDecorView().postDelayed(this::requestProjection, 1200);
+            }
+        } catch (Throwable ignored) { }
         // 已移除：以前"Activity 重建后自动申请录屏"。现在入口页不再切双屏，
         // 重建也不该发生；留着它会导致"打开 App 又自动跳进镜像"（用户明确不要）。
         // 一进来就把外屏点亮：退出后 device_state 回到 1，外屏是关的，
@@ -182,7 +195,7 @@ public class MainActivity extends Activity {
                 Math.round(300 * d), Math.round(72 * d));
         goLp.setMargins(0, pad, 0, Math.round(pad * 1.5f));
         go.setLayoutParams(goLp);
-        go.setOnClickListener(v -> requestProjection());
+        go.setOnClickListener(v -> startMirroring());
         root.addView(go);
 
         Button settings = new Button(this);
@@ -306,6 +319,23 @@ public class MainActivity extends Activity {
     }
 
     /** 申请录屏授权（appops 已预授权，系统页会自动放行）。 */
+    /** 用户按下「开始镜像到外屏」后的唯一入口。 */
+    private void startMirroring() {
+        // 单屏态下，"默认屏幕"是外屏（748x720）——此时申请录屏会抓到外屏自己，
+        // 画面变成"镜子拍镜子"。所以必须先切到双屏并发(state 4)再申请。
+        // 但切屏会把本 Activity 销毁重建，所以用落盘标记把"待申请"接力到重建后。
+        try {
+            if (Shell.available()) {
+                getSharedPreferences(PREFS_UI, MODE_PRIVATE).edit()
+                        .putBoolean(K_PENDING_START, true).apply();
+                Shell.execSync("cmd device_state state 4");
+                Log.i(TAG, "start: switch to dual screen, will request after recreate");
+                return;
+            }
+        } catch (Throwable ignored) { }
+        requestProjection();
+    }
+
     private void requestProjection() {
         // 先把双屏并发打开：外屏(state OFF)不亮的话，录屏授权对话框没有地方显示，
         // 流程会卡在 requestProjection 之后一动不动（实测：日志停在 on display 0，画面全黑）。

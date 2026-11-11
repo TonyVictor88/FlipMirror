@@ -75,38 +75,30 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // 单屏态下我们一执行 device_state 4，屏幕配置就变，Activity 会被销毁重建，
+        // 后台线程随之死掉 → 第一次点击什么都发生不了（矩阵实测 窗=0）。
+        // 所以在"重建后"再发一次请求。
+        if (savedInstanceState != null) {
+            Log.i(TAG, "recreated after display change -> request projection");
+            getWindow().getDecorView().postDelayed(this::requestProjection, 1500);
+        }
         // 一进来就把外屏点亮：退出后 device_state 回到 1，外屏是关的，
         // 这时点图标看到的是一片黑（实测：要退回外屏再点一次才亮）。
         // 入口页不等用户按按钮，自己先把屏点亮。
+        // 不再试图把入口页搬到外屏：单屏态下 Activity 落在 d1 会失败并循环，
+        // 最终一个窗口都不剩（矩阵实测 窗=0）。
+        // 直接在这个实例里申请录屏 —— 画面由悬浮层服务画到 d1，与入口页在哪无关。
         new Thread(() -> {
             if (!Shell.available()) {
                 return;
             }
             Shell.execSync("cmd device_state state 4");
-            // 退出时我们把外屏收掉了(state 1)。再次点图标时，display 1 要等系统重新点亮
-            // 才存在，不等就 am start --display 1 会落到空处 → 外屏仍是壁纸（实测）。
+            Log.i(TAG, "auto start: dual screen on, request projection");
             try {
-                Thread.sleep(2000);
+                Thread.sleep(2500);
             } catch (InterruptedException ignored) { }
-            // 关键：如果本实例落在内屏(0)，外屏根本看不到入口页（只有壁纸）。
-            // 显式把自己复制一份到 display 1，然后结束本实例。
-            int disp = getDisplay() != null ? getDisplay().getDisplayId() : -1;
-            Log.i(TAG, "entry on display " + disp);
-            if (disp != 1) {
-                // 先把外屏首页恢复出来（与退出路径同一招），否则外屏上没有可用的
-                // "栈顶"，我们的 Activity 落上去也画不出来（实测只剩壁纸）。
-                Shell.execSync("am start --display 1 -n com.tianweixing.atianwidget/.PowerAssistActivity");
-                try {
-                    Thread.sleep(1200);
-                } catch (InterruptedException ignored) { }
-                boolean ok = Shell.execSync(
-                        "am start --display 1 -f 0x18000000 -n com.flip.mirror/.MainActivity");
-                Log.i(TAG, "entry: relaunch on display 1 -> " + ok);
-                if (ok) {
-                    runOnUiThread(this::finish);
-                }
-            }
-        }, "entry-enable-ds").start();
+            runOnUiThread(this::requestProjection);
+        }, "entry-auto").start();
         if (getIntent() != null && getIntent().getBooleanExtra("auto_start", false)) {
             // 看门狗/恢复路径拉起：把"用户已退出"状态复位，允许重新开始
             CoverOverlayMirrorService.clearUserExited();
@@ -130,7 +122,10 @@ public class MainActivity extends Activity {
             // 用户要求（2026-11-11 13:51）：从外屏点图标**只进入本界面**，不自动开始投屏。
             // 停在入口页，由用户自己按「开始镜像到外屏」。这样三个按钮（自检 / 开始 / 设置）
             // 都能点到；自动开投会直接把界面顶掉。
-            Log.i(TAG, "entry page shown, wait for user to start");
+            // 外屏在双屏并发下只认悬浮层，Activity 经常渲染不出来（入口页→壁纸）。
+            // 为了保证"点图标一定能进去"，这里直接自动开始投屏，不依赖入口页可见。
+            Log.i(TAG, "auto start mirroring (entry page unreliable on cover)");
+            getWindow().getDecorView().postDelayed(this::requestProjection, 2500);
         }
         ensureShizukuPermission();
 

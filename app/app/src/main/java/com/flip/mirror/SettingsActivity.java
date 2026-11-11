@@ -266,18 +266,38 @@ public class SettingsActivity extends Activity {
 
     private void addSwitch(LinearLayout card, final String key, String title, String sub, boolean def) {
         LinearLayout row = addRow(card, title, sub);
-        Switch sw = new Switch(this);
-        sw.setChecked(store.getBool(key, def));
-        sw.setOnCheckedChangeListener((b, checked) -> store.setBool(key, checked));
-        // 开关必须有确定宽度：之前用默认 wrap_content，被左侧带 weight 的文字挤到
-        // 屏幕外，只剩一条"关"字的边（用户反馈"开关点不动"就是它根本没显示出来）。
-        LinearLayout.LayoutParams swLp = new LinearLayout.LayoutParams(
-                Math.round(72 * density), ViewGroup.LayoutParams.WRAP_CONTENT);
-        swLp.leftMargin = Math.round(8 * density);
-        row.addView(sw, swLp);
-        // 整行可点：之前只有那个小开关能点，点文字没反应（用户反馈"一堆设置点不了"）
+
+        // 不用系统 Switch：它在小屏 + weight 布局里会被压成一条 8px 竖线，
+        // 截图实测完全看不见（等于没做开关）。
+        // 改成自绘开关：固定像素宽高 + 纯文字「开/关」，不依赖任何主题度量。
+        final TextView sw = new TextView(this);
+        final int w = Math.round(64 * density);
+        final int h = Math.round(36 * density);
+        sw.setLayoutParams(new LinearLayout.LayoutParams(w, h));
+        sw.setGravity(android.view.Gravity.CENTER);
+        sw.setTextSize(13);
+        sw.setTextColor(0xFFFFFFFF);
+        final Runnable paint = () -> {
+            boolean on = store.getBool(key, def);
+            sw.setText(on ? "开" : "关");
+            android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
+            bg.setCornerRadius(8 * density);
+            bg.setColor(on ? 0xFF2FA84F : 0xFF4A4F57);
+            sw.setBackground(bg);
+        };
+        paint.run();
+        sw.setOnClickListener(v -> {
+            store.setBool(key, !store.getBool(key, def));
+            paint.run();
+        });
+        row.addView(sw);
+
+        // 整行也可点
         row.setClickable(true);
-        row.setOnClickListener(v -> sw.setChecked(!sw.isChecked()));
+        row.setOnClickListener(v -> {
+            store.setBool(key, !store.getBool(key, def));
+            paint.run();
+        });
     }
 
     private void addSlider(LinearLayout card, final String key, String title, String sub,

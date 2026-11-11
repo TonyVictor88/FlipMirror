@@ -106,6 +106,9 @@ public class CoverOverlayMirrorService extends Service {
      */
     private volatile boolean mProjectionAlive = false;
 
+    /** 服务启动时刻：启动过程中点屏会触发 SCREEN_ON，必须屏蔽自愈否则会拉起第二份。 */
+    private volatile long mStartAt = 0;
+
     /** 正在退出：看门狗不得再把控件条补回来。 */
     private volatile boolean mShuttingDown = false;
 
@@ -159,6 +162,7 @@ public class CoverOverlayMirrorService extends Service {
     public void onCreate() {
         super.onCreate();
         sRunning = true;
+        mStartAt = android.os.SystemClock.elapsedRealtime();
         mShuttingDown = false;
         sUserExited = false;
         try {
@@ -328,6 +332,12 @@ public class CoverOverlayMirrorService extends Service {
                 @Override
                 public void onReceive(android.content.Context c, Intent i) {
                     if (i == null || !Intent.ACTION_SCREEN_ON.equals(i.getAction())) {
+                        return;
+                    }
+                    // 启动后 15 秒内忽略：这段时间是我们自己刚把屏点亮的，
+                    // 自愈再拉一次会起第二份服务（实测窗口 1->2、黑屏）。
+                    if (android.os.SystemClock.elapsedRealtime() - mStartAt < 15000) {
+                        Log.i(TAG, "screen on during startup, skip recovery");
                         return;
                     }
                     // 外屏必须每次亮屏都重新点亮：关屏会撤掉双屏并发，

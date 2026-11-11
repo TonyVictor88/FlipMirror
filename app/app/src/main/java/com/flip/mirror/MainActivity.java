@@ -54,6 +54,25 @@ public class MainActivity extends Activity {
      * （实测：pm grant 显示 granted=true，但 checkSelfPermission() 返回 -1）。
      * 用户点一次「允许」之后才会持久化，重装/换签名后需要重新点。
      */
+    /**
+     * 自动准备屏幕：开机/重启后 device_state 会回到单屏，外屏是黑的，
+     * 用户点图标只看到一片黑，自检也过不了。这里自动把它拉回来。
+     */
+    private void autoPrepScreen() {
+        new Thread(() -> {
+            try {
+                if (!Shell.available()) {
+                    Log.i(TAG, "autoPrep: no shell");
+                    return;
+                }
+                Shell.execSync("cmd device_state state 4");
+                Log.i(TAG, "autoPrep: dual screen on");
+            } catch (Throwable t) {
+                Log.w(TAG, "autoPrep failed: " + t);
+            }
+        }, "auto-prep").start();
+    }
+
     private void ensureShizukuPermission() {
         // 刚开机时 Shizuku 的 binder 常常还没就绪（实测日志：
         // "binder haven't been received" → 直接跳过申请 → 权限停在 0 → 自检失败）。
@@ -187,6 +206,7 @@ public class MainActivity extends Activity {
             Log.i(TAG, "entry page only, wait for user to press start");
         }
         ensureShizukuPermission();
+        autoPrepScreen();
 
         float d = getResources().getDisplayMetrics().density;
         int pad = (int) (16 * d);

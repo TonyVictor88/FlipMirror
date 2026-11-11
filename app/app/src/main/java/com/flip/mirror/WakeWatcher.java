@@ -29,36 +29,10 @@ public class WakeWatcher extends BroadcastReceiver {
         if (action == null) {
             return;
         }
-
-        boolean should;
-        try {
-            SharedPreferences sp = ctx.getSharedPreferences(
-                    KeepAliveReceiver.PREFS, Context.MODE_PRIVATE);
-            should = sp.getBoolean(KeepAliveReceiver.KEY_SHOULD_MIRROR, false);
-        } catch (Throwable t) {
-            should = false;
-        }
-
-        if (!should) {
-            Log.i(TAG, "should_mirror=false, ignore " + action);
-            return;
-        }
-
-        // 每次事件都续一次闹钟：保证兜底不会因为长时间没事件而失效
-        try {
-            KeepAliveReceiver.schedule(ctx);
-        } catch (Throwable ignored) { }
-
-        if (Intent.ACTION_SCREEN_ON.equals(action)
-                || Intent.ACTION_USER_PRESENT.equals(action)
-                || Intent.ACTION_BOOT_COMPLETED.equals(action)) {
-            if (!KeepAliveReceiver.isServiceAlive(ctx)) {
-                Log.w(TAG, "service gone on " + action + " -> relaunch");
-                relaunch(ctx);
-            } else {
-                Log.i(TAG, "service alive on " + action);
-            }
-        }
+        // 不在这里判断"要不要、怎么做" —— 全部交给唯一的对账函数。
+        // 之前这里各写一套判断，和闹钟/入口的判断打架，关屏问题反复复发。
+        KeepAliveReceiver.schedule(ctx);
+        MirrorState.reconcile(ctx, "event:" + action);
     }
 
     private void relaunch(Context ctx) {

@@ -112,6 +112,9 @@ public class CoverOverlayMirrorService extends Service {
     /** 正在退出：看门狗不得再把控件条补回来。 */
     private volatile boolean mShuttingDown = false;
 
+    /** ✕ 二次确认：第一次点的时间戳。 */
+    private volatile long mExitArmedAt = 0;
+
     /**
      * 服务是否已经在跑。
      *
@@ -170,8 +173,7 @@ public class CoverOverlayMirrorService extends Service {
         mStartAt = android.os.SystemClock.elapsedRealtime();
         // 落盘标记：告诉看门狗"用户期望正在投屏"。进程被杀也不丢。
         try {
-            getSharedPreferences(KeepAliveReceiver.PREFS, MODE_PRIVATE).edit()
-                    .putBoolean(KeepAliveReceiver.KEY_SHOULD_MIRROR, true).apply();
+            MirrorState.setDesired(this, true);
             KeepAliveReceiver.schedule(this);
         } catch (Throwable ignored) { }
         mShuttingDown = false;
@@ -248,7 +250,21 @@ public class CoverOverlayMirrorService extends Service {
                 @Override public void onBack()    { Shell.exec("input -d 0 keyevent 4"); }
                 @Override public void onHome()    { Shell.exec("input -d 0 keyevent 3"); }
                 @Override public void onRecents() { Shell.exec("input -d 0 keyevent 187"); }
-                @Override public void onExit()    { shutdown(); }
+                @Override public void onExit()    {
+                    // 二次确认：悬浮层是全屏单窗口，右上角很窄，点 App 图标时容易误触。
+                    // 第一次点只提示，3 秒内再点才真退出（实测误触导致"投屏自己丢了"）。
+                    long now = android.os.SystemClock.elapsedRealtime();
+                    if (now - mExitArmedAt > 3000) {
+                        mExitArmedAt = now;
+                        Log.i(TAG, "exit armed, tap again within 3s");
+                        try {
+                            android.widget.Toast.makeText(getApplicationContext(),
+                                    "再点一次退出", android.widget.Toast.LENGTH_SHORT).show();
+                        } catch (Throwable ignored) { }
+                        return;
+                    }
+                    shutdown();
+                }
                 @Override public void onCollapse() { }
                 @Override public void onExpand()   { }
             });
@@ -684,8 +700,7 @@ public class CoverOverlayMirrorService extends Service {
         mShuttingDown = true;
         sUserExited = true;
         try {
-            getSharedPreferences(KeepAliveReceiver.PREFS, MODE_PRIVATE).edit()
-                    .putBoolean(KeepAliveReceiver.KEY_SHOULD_MIRROR, false).apply();
+            MirrorState.setDesired(this, false);
             KeepAliveReceiver.cancel(this);
         } catch (Throwable ignored) { }
         try {

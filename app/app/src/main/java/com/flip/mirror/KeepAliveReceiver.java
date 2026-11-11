@@ -35,33 +35,14 @@ public class KeepAliveReceiver extends BroadcastReceiver {
 
     /** 「用户期望正在投屏」标记：服务启动写 true，点 ✕ 退出写 false。 */
     public static final String PREFS = "flipmirror_settings";
-    public static final String KEY_SHOULD_MIRROR = "should_mirror";
+    public static final String KEY_SHOULD_MIRROR = MirrorState.KEY_DESIRED;
 
     @Override
     public void onReceive(Context ctx, Intent intent) {
         try {
             schedule(ctx);   // 先自续期，保证不会因为下面抛异常而断掉
         } catch (Throwable ignored) { }
-
-        try {
-            SharedPreferences sp = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
-            if (!sp.getBoolean(KEY_SHOULD_MIRROR, false)) {
-                Log.i(TAG, "should_mirror=false, idle");
-                return;
-            }
-            if (isServiceAlive(ctx)) {
-                Log.i(TAG, "service alive, ok");
-                return;
-            }
-            Log.w(TAG, "service gone -> relaunch entry");
-            Intent it = new Intent(ctx, MainActivity.class);
-            it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-            it.putExtra("auto_start", true);
-            it.putExtra("force_overlay", true);
-            ctx.startActivity(it);
-        } catch (Throwable t) {
-            Log.w(TAG, "tick failed: " + t);
-        }
+        MirrorState.reconcile(ctx, "alarm");
     }
 
     static boolean isServiceAlive(Context ctx) {

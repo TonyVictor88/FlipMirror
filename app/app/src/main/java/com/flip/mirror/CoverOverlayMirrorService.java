@@ -127,6 +127,9 @@ public class CoverOverlayMirrorService extends Service {
      */
     private static volatile boolean sRunning = false;
 
+    /** 与实例的 mHidden 同步的一份静态标记，供入口页跨进程/跨实例判断。 */
+    private static volatile boolean sHidden = false;
+
     /**
      * 用户主动点了 ✕ 退出。
      *
@@ -140,6 +143,17 @@ public class CoverOverlayMirrorService extends Service {
     /** 看门狗拉起前调用：清掉"用户已退出"，否则 onStartCommand 会立刻自我停止。 */
     public static void clearUserExited() {
         sUserExited = false;
+    }
+
+    /**
+     * 当前是否**真的显示着**镜像（服务活着但已隐藏时返回 false）。
+     *
+     * 入口页要用它判断"该不该忽略这次点击"：
+     *  - 用 isRunning()：✕ 退出只是隐藏，服务仍活着 → 恒 true → 入口页被立刻关掉
+     *  - 用 desired：进程被杀后残留 true → 同样关掉
+     */
+    public static boolean isShowing() {
+        return sRunning && !sHidden;
     }
 
     public static boolean isRunning() {
@@ -740,6 +754,7 @@ public class CoverOverlayMirrorService extends Service {
     /** 把已存在的悬浮层重新显示出来（退出后再进入走这条，不重建窗口）。 */
     private void showAgain() {
         mHidden = false;
+        sHidden = false;
         try {
             if (mRoot != null && mWm != null) {
                 applyFlipIfNeeded();
@@ -764,6 +779,7 @@ public class CoverOverlayMirrorService extends Service {
         // 之后再请回来它是"resumed 但不绘制"，外屏永远停在壁纸（今天试了三种办法都不行）。
         // 隐藏则不碰窗口栈，SubHome 一直在下面活着，立刻可见。
         mHidden = true;
+        sHidden = true;
         sUserExited = false;          // 允许下次直接再显示
         try {
             MirrorState.setDesired(this, false);
@@ -854,6 +870,7 @@ public class CoverOverlayMirrorService extends Service {
         } catch (Throwable ignored) { }
         mProjectionAlive = false;
         sRunning = false;
+        sHidden = false;
         sResultCode = 0;
         sResultData = null;
         super.onDestroy();

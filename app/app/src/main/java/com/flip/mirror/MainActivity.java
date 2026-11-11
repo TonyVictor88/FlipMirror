@@ -117,7 +117,9 @@ public class MainActivity extends Activity {
         // 幂等：镜像已经在跑时，再点「FlipMirror」图标应当什么都不做。
         // 之前会打开入口页并把正在运行的悬浮层顶掉（实测窗口 1->2，外屏只剩壁纸）。
         // 只有带 auto_start（看门狗/亮屏恢复）时才继续走流程。
-        if (CoverOverlayMirrorService.isRunning()
+        // 判据用 isShowing()：真正显示着镜像时才忽略这次点击。
+        // 用 isRunning 会因"✕ 只是隐藏"而恒真；用 desired 会因进程被杀后残留而误判。
+        if (CoverOverlayMirrorService.isShowing()
                 && (getIntent() == null
                     || !getIntent().getBooleanExtra("auto_start", false))) {
             Log.i(TAG, "already mirroring, ignore FlipMirror launch");
@@ -126,7 +128,7 @@ public class MainActivity extends Activity {
         }
         // 没在投屏时，从任意图标进来都直接开始 —— 用户点图标就是想投屏，
         // 不是想看我这个设置页（之前点「FlipMirror」只弹设置页，看着像"投不上"）。
-        if (!CoverOverlayMirrorService.isRunning()
+        if (!CoverOverlayMirrorService.isShowing()
                 && (getIntent() == null
                     || !getIntent().getBooleanExtra("auto_start", false))) {
             // 用户要求：点图标只进入口页，不自动开始投屏（2026-11-11 20:42 再次确认）。

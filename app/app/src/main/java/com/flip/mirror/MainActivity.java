@@ -249,9 +249,10 @@ public class MainActivity extends Activity {
         Button selfCheck = new Button(this);
         styleFlat(selfCheck, 0xFF26303A);
         selfCheck.setText("① 启动前自检（双屏 + Shizuku）");
-        selfCheck.setLayoutParams(new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT));
+        LinearLayout.LayoutParams selfCheckLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, Math.round(54 * d));
+        selfCheckLp.setMargins(0, Math.round(7 * d), 0, Math.round(7 * d));
+        selfCheck.setLayoutParams(selfCheckLp);
         selfCheck.setOnClickListener(v -> runSelfCheck());
         root.addView(selfCheck);
 
@@ -260,9 +261,10 @@ public class MainActivity extends Activity {
         go.setText("开始镜像到外屏");
         go.setTextSize(20);
         go.setAllCaps(false);
+        // 四个按钮统一尺寸（原来这个 300x72 的大块让整页显得乱）
         LinearLayout.LayoutParams goLp = new LinearLayout.LayoutParams(
-                Math.round(300 * d), Math.round(72 * d));
-        goLp.setMargins(0, pad, 0, Math.round(pad * 1.5f));
+                LinearLayout.LayoutParams.MATCH_PARENT, Math.round(54 * d));
+        goLp.setMargins(0, Math.round(7 * d), 0, Math.round(7 * d));
         go.setLayoutParams(goLp);
         go.setOnClickListener(v -> startMirroring());
         root.addView(go);
@@ -271,8 +273,10 @@ public class MainActivity extends Activity {
         styleFlat(settings, 0xFF26303A);
         settings.setText("设置");
         settings.setAllCaps(false);
-        settings.setLayoutParams(new LinearLayout.LayoutParams(
-                Math.round(300 * d), Math.round(44 * d)));
+        LinearLayout.LayoutParams settingsLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, Math.round(54 * d));
+        settingsLp.setMargins(0, Math.round(7 * d), 0, Math.round(7 * d));
+        settings.setLayoutParams(settingsLp);
         settings.setOnClickListener(v ->
                 startActivity(new Intent(MainActivity.this, SettingsActivity.class)));
         root.addView(settings);
@@ -282,9 +286,10 @@ public class MainActivity extends Activity {
         styleFlat(backHome, 0xFF1B2029);
         backHome.setText("← 返回外屏首页");
         backHome.setAllCaps(false);
-        backHome.setLayoutParams(new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT));
+        LinearLayout.LayoutParams backHomeLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, Math.round(54 * d));
+        backHomeLp.setMargins(0, Math.round(7 * d), 0, Math.round(7 * d));
+        backHome.setLayoutParams(backHomeLp);
         backHome.setOnClickListener(v -> {
             try {
                 if (Shell.available()) {

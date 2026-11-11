@@ -295,7 +295,12 @@ public class MainActivity extends Activity {
         });
         root.addView(backHome);
 
-        setContentView(root);
+        // 内容比 720px 高时最下面的按钮会被截掉（用户反馈看不到返回按钮）。
+        // 套一层 ScrollView，保证所有按钮都能滚到。
+        android.widget.ScrollView sv = new android.widget.ScrollView(this);
+        sv.setFillViewport(true);
+        sv.addView(root);
+        setContentView(sv);
 
         // 🔴 试验：不依赖 shell 直接请求 device_state = 4（双屏并发）。
         //    依据 AOSP：top-focused activity 调 requestState 不需要 CONTROL_DEVICE_STATE 权限。

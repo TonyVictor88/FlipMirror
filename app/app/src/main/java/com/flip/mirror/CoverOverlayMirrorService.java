@@ -477,6 +477,18 @@ public class CoverOverlayMirrorService extends Service {
             // 只转这条，不转根容器，所以它仍停在右上角原位。
             if (mBar != null) {
                 mBar.setRotation(flip ? 180f : 0f);
+                // 翻转后条内顺序也反了（✕ 跑到条的内侧），所以把整条挪到另一端，
+                // 让 ✕ 仍落在屏幕最外角（用户要求"X 应该也在最角落"）。
+                try {
+                    android.widget.FrameLayout.LayoutParams lp =
+                            (android.widget.FrameLayout.LayoutParams) mBar.getLayoutParams();
+                    int g = flip ? (android.view.Gravity.TOP | android.view.Gravity.START)
+                                 : (android.view.Gravity.TOP | android.view.Gravity.END);
+                    if (lp.gravity != g) {
+                        lp.gravity = g;
+                        mBar.setLayoutParams(lp);
+                    }
+                } catch (Throwable ignored) { }
             }
             Log.i(TAG, "flip180 = " + flip);
         } catch (Throwable t) {

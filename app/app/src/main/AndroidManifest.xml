@@ -136,12 +136,8 @@
             android:excludeFromRecents="true"
             android:noHistory="true"
             android:label="投屏到外屏"
-            android:theme="@android:style/Theme.NoDisplay">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity>
+            android:theme="@android:style/Theme.NoDisplay" />
+        <!-- 已移除 LAUNCHER 入口：桌面上只保留一个 FlipMirror 图标 -->
 
         <service
             android:name=".CoverOverlayMirrorService"

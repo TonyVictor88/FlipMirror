@@ -70,6 +70,8 @@ public class MainActivity extends Activity {
         finish();
     }
 
+    private Button mSelfCheck, mGo, mSettings, mBackHome;
+
     private void autoPrepScreen() {
         new Thread(() -> {
             try {
@@ -247,18 +249,20 @@ public class MainActivity extends Activity {
         //    （自己设置双屏并发 + 拉起 Shizuku）。App 本身 targetSdk 34 无法执行
         //    私有目录里的二进制（noexec），所以借 Termux（targetSdk 28）的手。
         Button selfCheck = new Button(this);
+        mSelfCheck = selfCheck;
         styleFlat(selfCheck, 0xFF26303A);
-        selfCheck.setText("① 启动前自检（双屏 + Shizuku）");
+        selfCheck.setText("① 自检");
         LinearLayout.LayoutParams selfCheckLp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, Math.round(54 * d));
         selfCheckLp.setMargins(0, Math.round(7 * d), 0, Math.round(7 * d));
         selfCheck.setLayoutParams(selfCheckLp);
         selfCheck.setOnClickListener(v -> runSelfCheck());
-        root.addView(selfCheck);
+
 
         Button go = new Button(this);
+        mGo = go;
         styleFlat(go, 0xFF3D7DFF);
-        go.setText("开始镜像到外屏");
+        go.setText("开始镜像");
         go.setTextSize(20);
         go.setAllCaps(false);
         // 四个按钮统一尺寸（原来这个 300x72 的大块让整页显得乱）
@@ -267,9 +271,10 @@ public class MainActivity extends Activity {
         goLp.setMargins(0, Math.round(7 * d), 0, Math.round(7 * d));
         go.setLayoutParams(goLp);
         go.setOnClickListener(v -> startMirroring());
-        root.addView(go);
+
 
         Button settings = new Button(this);
+        mSettings = settings;
         styleFlat(settings, 0xFF26303A);
         settings.setText("设置");
         settings.setAllCaps(false);
@@ -279,12 +284,13 @@ public class MainActivity extends Activity {
         settings.setLayoutParams(settingsLp);
         settings.setOnClickListener(v ->
                 startActivity(new Intent(MainActivity.this, SettingsActivity.class)));
-        root.addView(settings);
+
 
         // 外屏没有系统返回键（按键事件被内屏吃掉），给一个显式出口
         android.widget.Button backHome = new android.widget.Button(this);
+        mBackHome = backHome;
         styleFlat(backHome, 0xFF1B2029);
-        backHome.setText("← 返回外屏首页");
+        backHome.setText("← 返回首页");
         backHome.setAllCaps(false);
         LinearLayout.LayoutParams backHomeLp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, Math.round(54 * d));
@@ -298,14 +304,40 @@ public class MainActivity extends Activity {
             } catch (Throwable ignored) { }
             finish();
         });
-        root.addView(backHome);
 
-        // 内容比 720px 高时最下面的按钮会被截掉（用户反馈看不到返回按钮）。
-        // 套一层 ScrollView，保证所有按钮都能滚到。
-        android.widget.ScrollView sv = new android.widget.ScrollView(this);
-        sv.setFillViewport(true);
-        sv.addView(root);
-        setContentView(sv);
+
+        // 不要滚动：四键排成 2×2，一屏内全露出
+        // 先把四个按钮从 root 摘下来，再按两行两列重新摆
+        // 不要 removeAllViews：会把标题和状态文字一起清掉
+        LinearLayout row1 = new LinearLayout(this);
+        row1.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout row2 = new LinearLayout(this);
+        row2.setOrientation(LinearLayout.HORIZONTAL);
+        row1.setLayoutParams(new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, Math.round(64 * d)));
+        row2.setLayoutParams(new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, Math.round(64 * d)));
+
+        LinearLayout.LayoutParams cell = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.MATCH_PARENT, 1f);
+        cell.setMargins(Math.round(6 * d), Math.round(6 * d), Math.round(6 * d), Math.round(6 * d));
+        row1.addView(mSelfCheck, cell);
+        LinearLayout.LayoutParams cell2 = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.MATCH_PARENT, 1f);
+        cell2.setMargins(Math.round(6 * d), Math.round(6 * d), Math.round(6 * d), Math.round(6 * d));
+        row1.addView(mGo, cell2);
+        LinearLayout.LayoutParams cell3 = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.MATCH_PARENT, 1f);
+        cell3.setMargins(Math.round(6 * d), Math.round(6 * d), Math.round(6 * d), Math.round(6 * d));
+        row2.addView(mSettings, cell3);
+        LinearLayout.LayoutParams cell4 = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.MATCH_PARENT, 1f);
+        cell4.setMargins(Math.round(6 * d), Math.round(6 * d), Math.round(6 * d), Math.round(6 * d));
+        row2.addView(mBackHome, cell4);
+
+        root.addView(row1);
+        root.addView(row2);
+        setContentView(root);
 
         // 🔴 试验：不依赖 shell 直接请求 device_state = 4（双屏并发）。
         //    依据 AOSP：top-focused activity 调 requestState 不需要 CONTROL_DEVICE_STATE 权限。

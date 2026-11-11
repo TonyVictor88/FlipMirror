@@ -146,6 +146,8 @@ public class SettingsActivity extends Activity {
         addSwitch(c2, SettingsStore.K_BTN_HOME, "显示「主页」", null, true);
         addSwitch(c2, SettingsStore.K_BTN_RECENTS, "显示「多任务」", null, true);
         addSwitch(c2, SettingsStore.K_BTN_COLLAPSE, "显示「收起」", "收起后变成小圆点，点圆点展开", true);
+        addSwitch(c2, SettingsStore.K_FLIP_180, "界面上下翻转",
+                "整个界面（含控件条）旋转 180°，外屏换个方向用", false);
         addSwitch(c2, SettingsStore.K_CORNER_MASK, "右上角补圆角",
                 "外屏左上/左下/右下自带圆弧，只补右上这一个角", true);
         addSlider(c2, SettingsStore.K_BAR_ALPHA, "控件条透明度", "30% ~ 100%（本版未接线）", 30, 100, 96, "%");

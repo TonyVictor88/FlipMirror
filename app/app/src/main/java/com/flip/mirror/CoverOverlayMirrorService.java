@@ -443,6 +443,24 @@ public class CoverOverlayMirrorService extends Service {
 
     /* ------------------------------------------------------------ 悬浮层 */
 
+    /**
+     * 按设置把整个界面上下翻转。
+     * 用 View 的 180° 旋转而不是改布局：旋转同时作用于绘制与触摸命中，
+     * 画面、控件条、提示条会一起翻过去，坐标换算不用另写一套。
+     */
+    private void applyFlipIfNeeded() {
+        try {
+            if (mRoot == null) {
+                return;
+            }
+            boolean flip = new SettingsStore(this).flip180();
+            mRoot.setRotation(flip ? 180f : 0f);
+            Log.i(TAG, "flip180 = " + flip);
+        } catch (Throwable t) {
+            Log.w(TAG, "applyFlip failed: " + t);
+        }
+    }
+
     private void showOverlay() {
         // 重入锁：已经在显示就直接返回。
         // 启动阶段这个方法会被调用多次（服务被创建多次 / 恢复路径），
@@ -516,6 +534,7 @@ public class CoverOverlayMirrorService extends Service {
             // 先透明挂上：启动过程中会改 wm size / 点亮外屏，画面会重排几下，
             // 直接可见就会"来回跳"（实测）。等第一帧到了再显示。
             mRoot.setAlpha(0f);
+            applyFlipIfNeeded();
             mWm.addView(mRoot, mWmParams);
 
             addControlBar();
@@ -723,6 +742,7 @@ public class CoverOverlayMirrorService extends Service {
         mHidden = false;
         try {
             if (mRoot != null && mWm != null) {
+                applyFlipIfNeeded();
                 mRoot.setAlpha(1f);
                 mWmParams.flags &= ~WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
                 mWm.updateViewLayout(mRoot, mWmParams);

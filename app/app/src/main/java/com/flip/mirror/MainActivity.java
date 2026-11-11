@@ -98,26 +98,17 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        // 单屏态下我们一执行 device_state 4，屏幕配置就变，Activity 会被销毁重建，
-        // 后台线程随之死掉 → 第一次点击什么都发生不了（矩阵实测 窗=0）。
-        // 所以在"重建后"再发一次请求。
-        if (savedInstanceState != null) {
-            Log.i(TAG, "recreated after display change -> request projection");
-            getWindow().getDecorView().postDelayed(this::requestProjection, 1500);
-        }
+        // 已移除：以前"Activity 重建后自动申请录屏"。现在入口页不再切双屏，
+        // 重建也不该发生；留着它会导致"打开 App 又自动跳进镜像"（用户明确不要）。
         // 一进来就把外屏点亮：退出后 device_state 回到 1，外屏是关的，
         // 这时点图标看到的是一片黑（实测：要退回外屏再点一次才亮）。
         // 入口页不等用户按按钮，自己先把屏点亮。
         // 不再试图把入口页搬到外屏：单屏态下 Activity 落在 d1 会失败并循环，
         // 最终一个窗口都不剩（矩阵实测 窗=0）。
         // 直接在这个实例里申请录屏 —— 画面由悬浮层服务画到 d1，与入口页在哪无关。
-        new Thread(() -> {
-            if (!Shell.available()) {
-                return;
-            }
-            Log.i(TAG, "auto start: request projection first");
-            runOnUiThread(this::requestProjection);
-        }, "entry-auto").start();
+        // 打开 App 什么都不做，只显示入口页（用户 2026-11-11 20:42 要求）。
+        // ⚠️ 这里**不能**顺手切双屏：切屏会触发配置变更把本页顶掉，
+        // 用户看到的是外屏首页/壁纸。双屏由服务在拿到录屏授权后再置。
         if (getIntent() != null && getIntent().getBooleanExtra("auto_start", false)) {
             // 看门狗/恢复路径拉起：把"用户已退出"状态复位，允许重新开始
             CoverOverlayMirrorService.clearUserExited();
@@ -138,13 +129,12 @@ public class MainActivity extends Activity {
         if (!CoverOverlayMirrorService.isRunning()
                 && (getIntent() == null
                     || !getIntent().getBooleanExtra("auto_start", false))) {
-            // 用户要求（2026-11-11 13:51）：从外屏点图标**只进入本界面**，不自动开始投屏。
-            // 停在入口页，由用户自己按「开始镜像到外屏」。这样三个按钮（自检 / 开始 / 设置）
-            // 都能点到；自动开投会直接把界面顶掉。
-            // 外屏在双屏并发下只认悬浮层，Activity 经常渲染不出来（入口页→壁纸）。
-            // 为了保证"点图标一定能进去"，这里直接自动开始投屏，不依赖入口页可见。
-            Log.i(TAG, "auto start mirroring (entry page unreliable on cover)");
-            getWindow().getDecorView().postDelayed(this::requestProjection, 2500);
+            // 用户要求：点图标只进入口页，不自动开始投屏（2026-11-11 20:42 再次确认）。
+            // 同时把 desired 清掉：否则看门狗（亮屏事件 / 10 分钟闹钟）看到 desired=true
+            // 会把镜像重新拉起来 —— 表现就是"一打开 App 又跳进镜像"。
+            MirrorState.setDesired(this, false);
+            KeepAliveReceiver.cancel(this);
+            Log.i(TAG, "entry page only, wait for user to press start");
         }
         ensureShizukuPermission();
 
@@ -207,10 +197,8 @@ public class MainActivity extends Activity {
         // 🔴 试验：不依赖 shell 直接请求 device_state = 4（双屏并发）。
         //    依据 AOSP：top-focused activity 调 requestState 不需要 CONTROL_DEVICE_STATE 权限。
         //    成功的话就不需要 Shizuku 来完成这一步了。
-        if (android.os.Build.VERSION.SDK_INT >= 34) {
-            boolean ok = DeviceStateRequester.request(this, DeviceStateRequester.STATE_CONCURRENT);
-            android.util.Log.i("FlipMirror", "DeviceStateRequester.request(4) = " + ok);
-        }
+        // 已移除：onCreate 里切双屏会立刻触发配置变更（Activity 重建、入口页被顶掉），
+        // 而且用户明确要求"打开 App 不要自动跳进镜像"。双屏交给服务在授权后置。
 
         mPm = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
 

@@ -976,6 +976,8 @@ public class CoverOverlayMirrorService extends Service {
         private boolean mGestureActive = false;
         private float mDownX = 0f, mDownY = 0f;
         private int mMoveCount = 0;
+        private long mSwipeHintUntil = 0;
+        private String mSwipeHintText = "";
 
         /** 界面是否 180° 翻转（触摸坐标需要镜像）。 */
         private boolean mFlipTouch = false;
@@ -1122,6 +1124,16 @@ public class CoverOverlayMirrorService extends Service {
             }
             canvas.restore();
         
+            // 手势回显（诊断用）
+            if (mSwipeHintUntil > 0 && android.os.SystemClock.elapsedRealtime() < mSwipeHintUntil) {
+                canvas.drawRect(0, h - 90, w, h, mHintBg);
+                canvas.drawText(mSwipeHintText, w / 2f, h - 42, mHintTextCenter);
+                postInvalidateDelayed(200);
+            } else if (mSwipeHintUntil > 0) {
+                mSwipeHintUntil = 0;
+                invalidate();
+            }
+
             // 退出二次确认提示：必须画在画面之上（Toast 会跑到内屏，看不见）
             if (mExitHintUntil > 0) {
                 if (android.os.SystemClock.elapsedRealtime() < mExitHintUntil) {
@@ -1187,8 +1199,16 @@ public class CoverOverlayMirrorService extends Service {
                 case MotionEvent.ACTION_CANCEL:
                     if (mGestureActive) {
                         mGestureActive = false;
+                        float dx = sx - mDownX;
                         Log.i(TAG, "touch UP src=" + (int) sx + "," + (int) sy
-                                + " dx=" + (int) (sx - mDownX) + " moves=" + mMoveCount);
+                                + " dx=" + (int) dx + " moves=" + mMoveCount);
+                        // 屏幕回显：让用户直接看到手势有没有被我们收到
+                        if (Math.abs(dx) > 120) {
+                            mSwipeHintText = (dx > 0 ? "收到 →" : "收到 ←") + " dx=" + (int) dx
+                                    + " moves=" + mMoveCount;
+                            mSwipeHintUntil = android.os.SystemClock.elapsedRealtime() + 1500;
+                            invalidate();
+                        }
                         mTouch.send(sx, sy, MotionEvent.ACTION_UP);
                     }
                     break;

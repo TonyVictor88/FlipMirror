@@ -73,10 +73,10 @@ public class TouchUserService extends ITouchUserService.Stub {
                     m.setAccessible(true);
                     m.invoke(ev, displayId);
                 } catch (Throwable ignored) { }
-                // 🔴 改成 1 = INJECT_INPUT_EVENT_MODE_WAIT_FOR_FINISH。
-                // 原来用 0(ASYNC)，一批 15~24 个 MOVE 异步灌进去，顺序/丢弃都没有保证，
-                // 表现就是"滑动时灵时不灵、左→右经常没反应"。
-                mInject.invoke(mInputManager, ev, 1);
+                // 回退成 0 = ASYNC：binder 调用本身是串行发的，顺序有保证；
+                // 用 1(WAIT_FOR_FINISH) 会让每个 MOVE 等一次往返，整条手势被拉长，
+                // launcher 判不出 fling ⇒ 翻页失效（实测）。
+                mInject.invoke(mInputManager, ev, 0);
                 ev.recycle();
                 return;
             } catch (Throwable t) {

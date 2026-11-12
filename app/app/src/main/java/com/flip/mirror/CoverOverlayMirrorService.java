@@ -1017,6 +1017,22 @@ public class CoverOverlayMirrorService extends Service {
         }
 
         /** 由服务在应用翻转时同步过来。 */
+        /**
+         * 声明手势排除区：不声明的话，从屏幕左缘往右滑会被系统"返回手势"截走，
+         * 表现就是"只能从右往左滑，从左往右不生效"（实测反馈）。
+         */
+        @Override
+        protected void onLayout(boolean changed, int l, int t, int r, int b) {
+            super.onLayout(changed, l, t, r, b);
+            try {
+                if (android.os.Build.VERSION.SDK_INT >= 29 && getWidth() > 0) {
+                    java.util.List<android.graphics.Rect> rs = new java.util.ArrayList<>();
+                    rs.add(new android.graphics.Rect(0, 0, getWidth(), getHeight()));
+                    setSystemGestureExclusionRects(rs);
+                }
+            } catch (Throwable ignored) { }
+        }
+
         void setFlipTouch(boolean flip) {
             mFlipTouch = flip;
         }

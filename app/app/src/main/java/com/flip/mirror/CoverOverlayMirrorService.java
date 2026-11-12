@@ -668,7 +668,8 @@ public class CoverOverlayMirrorService extends Service {
                 // 合理性兜底：324 是正常值（等效 533dp），别再用 400 当前提把它顶回 480。
                 if (idpi < 200 || idpi > 640) { idpi = 324; }
                 Log.i(TAG, "prep size " + iw + "x" + ih + " @" + idpi);
-                String prep = "cmd device_state state 4; sleep 0.8; wm size "
+                String prep = "cmd device_state state 4; appops set com.flip.mirror PROJECT_MEDIA allow; "
+                        + "sleep 0.8; wm size "
                         + iw + "x" + ih + "; wm density " + idpi;
                 boolean ok = Shell.execSync(prep);
                 Log.i(TAG, "prepare inner display -> " + ok);

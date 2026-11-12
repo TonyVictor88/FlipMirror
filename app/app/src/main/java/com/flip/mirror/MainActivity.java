@@ -44,6 +44,8 @@ public class MainActivity extends Activity {
     private static boolean sPermRequested = false;
 
     private MediaProjectionManager mPm;
+    /** 本进程是否已把 PROJECT_MEDIA appop 打开（只需一次；杀进程后重设）。 */
+    private static boolean sProjectionOpReady = false;
     private TextView mStatus;
 
     /**
@@ -509,6 +511,25 @@ public class MainActivity extends Activity {
         if (mPm == null) {
             mStatus.setText("MediaProjectionManager 不可用");
             return;
+        }
+        // 🔴 让系统跳过录屏授权弹窗（2026-11-12）。
+        //    原理：授权页 MediaProjectionPermissionActivity 在 onCreate 里先查调用方有没有
+        //    「投影权限」，有就直接 setResult(RESULT_OK) 并 finish —— 页面上什么都不画。
+        //    这个权限就是 appop PROJECT_MEDIA。用 Shizuku 的 shell 先把本包的这个 op 打开，
+        //    之后（含进程被杀重启、甚至重装后第一次）都不会再弹。
+        //    它是系统给"已授权应用"的正式通道，不是绕过安全检查：其它应用仍然会弹。
+        //    放在申请之前必须是同步的 —— 异步的话授权页已经起来了，等于没设。
+        if (!sProjectionOpReady) {
+            try {
+                if (Shell.execSync("appops set com.flip.mirror PROJECT_MEDIA allow")) {
+                    sProjectionOpReady = true;
+                    Log.i(TAG, "media projection appop = allow（授权弹窗将被跳过）");
+                } else {
+                    Log.w(TAG, "media projection appop failed: " + Shell.lastError);
+                }
+            } catch (Throwable t) {
+                Log.w(TAG, "media projection appop error", t);
+            }
         }
         // 先拉起前台服务：系统授权页会把我们压到后台，
         // 三星的 Freecess 会冻结后台 App，冻结后 onActivityResult 永远回不来。

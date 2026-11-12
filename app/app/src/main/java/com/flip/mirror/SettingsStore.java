@@ -62,8 +62,14 @@ public class SettingsStore {
     public void reset()                          { sp.edit().clear().apply(); }
 
     // ---------- 镜像参数 ----------
-    public int innerWidth()   { return getInt(K_INNER_W, 1600); }
-    public int innerHeight()  { return getInt(K_INNER_H, 1398); }
+    // 🔴 1080x944 不是随便定的（2026-11-12 实测）：
+    //    物理面板 1080x1920，wm size 的宽 = 1080 ⇒ 系统缩放因子 min(1080/1080, 1920/944) = 1.0，
+    //    也就是「1:1 渲染 + 上下 letterbox」，不做整屏缩放。
+    //    而比例 1080/944 = 1.144 ≈ 外屏内容区 748/654 = 1.144，镜像时不裁不糊。
+    //    旧值 1600x1398 比例一样，但宽度 1600 > 物理 1080 ⇒ 系统整屏缩放 0.675，
+    //    实测该缩放下**横向滑动在屏幕上半区失效**（左右滑不动桌面的根因）。
+    public int innerWidth()   { return getInt(K_INNER_W, 1080); }
+    public int innerHeight()  { return getInt(K_INNER_H, 944); }
     public int innerDpi()     { return getInt(K_INNER_DPI, 480); }
     public String scaleMode() { return getStr(K_SCALE_MODE, "适应"); }
     public int fps()          { return getInt(K_FPS, 60); }

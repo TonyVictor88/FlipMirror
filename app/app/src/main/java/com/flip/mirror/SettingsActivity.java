@@ -115,8 +115,8 @@ public class SettingsActivity extends Activity {
 
         // ---- 卡片 1：镜像参数 ----
         LinearLayout c1 = addCard("镜像参数");
-        addText(c1, SettingsStore.K_INNER_W, "内屏宽度", "wm size 的宽（改了点「应用分辨率」生效）", 748);
-        addText(c1, SettingsStore.K_INNER_H, "内屏高度", "654 = 720 − 66（顶部控件条）", 654);
+        addText(c1, SettingsStore.K_INNER_W, "内屏宽度", "wm size 的宽（改了点「应用分辨率」生效）", 1080);
+        addText(c1, SettingsStore.K_INNER_H, "内屏高度", "944 = 1080 × 654/748（与外屏内容区同比例）", 944);
         // DPI 用滑块：调小 = 逻辑尺寸变大 = 界面元素变小、一屏显示更多（通知栏不再被裁）
         addSlider(c1, SettingsStore.K_INNER_DPI, "内屏 DPI", "240~480：调小则界面变小、显示更多", 240, 480, 340, "");
         addButton(c1, "应用分辨率", "执行 wm size / wm density（本版未接线）");

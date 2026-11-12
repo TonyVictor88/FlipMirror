@@ -248,8 +248,16 @@ public class CoverOverlayMirrorService extends Service {
     private boolean looksLikeCoverCapture(int capW, int capH) {
         try {
             int innerW = new SettingsStore(this).innerWidth();
-            // 内屏宽度通常 1600 左右，外屏 748。抓到明显小于内屏的一半，判为抓错。
-            return capW > 0 && capW * 2 < innerW;
+            // ⚠️ 旧判据是「capW*2 < innerW」（内屏 1600 / 外屏 748）。内屏改成 1080 之后，
+            //    采集宽 810 与「抓到外屏」的 748 太接近，宽度判据会失真 —— 改用**宽高比**判：
+            //    内屏逻辑 1080/944 = 1.144，外屏 748/720 = 1.039，两者差 0.105，足够区分。
+            if (capW <= 0 || capH <= 0) {
+                return false;
+            }
+            float aspect = (float) capW / capH;
+            boolean aspectWrong = Math.abs(aspect - 1080f / 944f) > 0.06f;
+            boolean tooNarrow = capW < innerW / 2;
+            return aspectWrong || tooNarrow;
         } catch (Throwable t) {
             return false;
         }
@@ -653,7 +661,8 @@ public class CoverOverlayMirrorService extends Service {
                 // 自愈：设置里的内屏尺寸/DPI 若是异常值（改动后残留、或误设），
                 // 会直接把投屏分辨率带偏（实测抓到 480x462 就是这类）。
                 int iw = st.innerWidth(), ih = st.innerHeight(), idpi = st.innerDpi();
-                if (iw < 1200 || ih < 1000) { iw = 1600; ih = 1398; }
+                // 合理性兜底（读到脏值才回落）。注意别再拿 1600x1398 当基准 —— 那个值会让系统整屏缩放。
+                if (iw < 700 || ih < 600) { iw = 1080; ih = 944; }
                 if (idpi < 400) { idpi = 480; }
                 Log.i(TAG, "prep size " + iw + "x" + ih + " @" + idpi);
                 String prep = "cmd device_state state 4; sleep 0.8; wm size "
@@ -677,9 +686,11 @@ public class CoverOverlayMirrorService extends Service {
                 Log.i(TAG, "inner size (from wm) = " + mSrcW + "x" + mSrcH);
             }
 
-            // 采集分辨率减半，降低内存与拷贝开销；显示时再放大到内容区
-            int capW = Math.max(1, mSrcW / 2);
-            int capH = Math.max(1, mSrcH / 2);
+            // 采集分辨率取 3/4（1080x944 → 810x708）：
+            // 外屏内容区 748x654，810 略高于它 ⇒ 显示时轻微缩小，不会糊；
+            // 而每帧内存 810*708*4 ≈ 2.3MB，与旧版（800x699）持平，不额外压内存。
+            int capW = Math.max(1, mSrcW * 3 / 4);
+            int capH = Math.max(1, mSrcH * 3 / 4);
             mReader = ImageReader.newInstance(capW, capH, PixelFormat.RGBA_8888, 2);
 
             mThread = new HandlerThread("flip-overlay-capture");
@@ -896,8 +907,11 @@ public class CoverOverlayMirrorService extends Service {
                 // 结论（今天验证到底）：外屏首页 SubHome **只在单屏模式(state 1)下存在**。
                 // 一旦回到双屏并发(state 4)，外屏就是块"空地"，只有壁纸。
                 // 所以退出只能停在 state 1 —— 首页正常；要再投屏时由入口页重新置 4。
+                // 🔴 2026-11-12 追加：退出时必须**还原 wm 覆盖**。
+                //    以前全仓没有一处 wm reset，退出/崩溃后内屏永久停在 1600x1398（系统整屏缩放 0.675），
+                //    连"横向滑动失效"都是这个覆盖值的后遗症。复位后内屏回到原生 1080x1920。
                 boolean ok = Shell.execSync(
-                        "cmd device_state state 1; sleep 0.4; "
+                        "cmd device_state state 1; wm size reset; wm density reset; sleep 0.4; "
                         + "am start --display 1 -n com.tianweixing.atianwidget/.PowerAssistActivity");
                 Log.i(TAG, "hide: home on cover -> " + ok);
             }, "hide-home").start();

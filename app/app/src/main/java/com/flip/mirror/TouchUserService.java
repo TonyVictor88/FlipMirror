@@ -63,13 +63,20 @@ public class TouchUserService extends ITouchUserService.Stub {
         if (mReady) {
             try {
                 MotionEvent ev = MotionEvent.obtain(downTime, eventTime, action, x, y, 0);
+                // 🔴 必须标明事件来源是触摸屏。obtain() 默认 source=SOURCE_UNKNOWN(0)，
+                // 系统对未知来源的手势判定不稳定（点按能过，滑动时灵时不灵）。
+                try {
+                    ev.setSource(android.view.InputDevice.SOURCE_TOUCHSCREEN);
+                } catch (Throwable ignored) { }
                 try {
                     Method m = MotionEvent.class.getDeclaredMethod("setDisplayId", int.class);
                     m.setAccessible(true);
                     m.invoke(ev, displayId);
                 } catch (Throwable ignored) { }
-                // 0 = INJECT_INPUT_EVENT_MODE_ASYNC，不等待，避免阻塞注入线程
-                mInject.invoke(mInputManager, ev, 0);
+                // 🔴 改成 1 = INJECT_INPUT_EVENT_MODE_WAIT_FOR_FINISH。
+                // 原来用 0(ASYNC)，一批 15~24 个 MOVE 异步灌进去，顺序/丢弃都没有保证，
+                // 表现就是"滑动时灵时不灵、左→右经常没反应"。
+                mInject.invoke(mInputManager, ev, 1);
                 ev.recycle();
                 return;
             } catch (Throwable t) {

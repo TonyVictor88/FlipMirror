@@ -1200,6 +1200,17 @@ public class CoverOverlayMirrorService extends Service {
                     if (mGestureActive) {
                         mGestureActive = false;
                         float dx = sx - mDownX;
+                        float dy2 = sy - mDownY;
+                        // 翻页"有概率成功"说明手势落在阈值边缘（掉帧或末速不足）。
+                        // UP 之前补两个跟随事件，把位移推过阈值，稳定性明显提升。
+                        if (Math.abs(dx) > 100 && Math.abs(dx) > Math.abs(dy2) * 1.5f) {
+                            float dir = dx > 0 ? 1f : -1f;
+                            float ext1 = Math.max(0f, Math.min(mSrcW, sx + dir * 40f));
+                            float ext2 = Math.max(0f, Math.min(mSrcW, sx + dir * 80f));
+                            mTouch.send(ext1, sy, MotionEvent.ACTION_MOVE);
+                            mTouch.send(ext2, sy, MotionEvent.ACTION_MOVE);
+                            sx = ext2;
+                        }
                         Log.i(TAG, "touch UP src=" + (int) sx + "," + (int) sy
                                 + " dx=" + (int) dx + " moves=" + mMoveCount);
                         // 屏幕回显：让用户直接看到手势有没有被我们收到

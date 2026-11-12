@@ -974,6 +974,8 @@ public class CoverOverlayMirrorService extends Service {
 
         /** 是否有一次触摸手势正在进行（保证 DOWN/UP 成对，防内屏指针卡住）。 */
         private boolean mGestureActive = false;
+        private float mDownX = 0f, mDownY = 0f;
+        private int mMoveCount = 0;
 
         /** 界面是否 180° 翻转（触摸坐标需要镜像）。 */
         private boolean mFlipTouch = false;
@@ -1168,10 +1170,14 @@ public class CoverOverlayMirrorService extends Service {
             switch (e.getActionMasked()) {
                 case MotionEvent.ACTION_DOWN:
                     mGestureActive = true;
+                    mDownX = sx; mDownY = sy; mMoveCount = 0;
+                    Log.i(TAG, "touch DOWN view=" + (int) e.getX() + "," + (int) e.getY()
+                            + " -> src=" + (int) sx + "," + (int) sy);
                     mTouch.send(sx, sy, MotionEvent.ACTION_DOWN);
                     break;
                 case MotionEvent.ACTION_MOVE:
                     if (mGestureActive) {
+                        mMoveCount++;
                         mTouch.send(sx, sy, MotionEvent.ACTION_MOVE);
                     }
                     break;
@@ -1181,6 +1187,8 @@ public class CoverOverlayMirrorService extends Service {
                 case MotionEvent.ACTION_CANCEL:
                     if (mGestureActive) {
                         mGestureActive = false;
+                        Log.i(TAG, "touch UP src=" + (int) sx + "," + (int) sy
+                                + " dx=" + (int) (sx - mDownX) + " moves=" + mMoveCount);
                         mTouch.send(sx, sy, MotionEvent.ACTION_UP);
                     }
                     break;

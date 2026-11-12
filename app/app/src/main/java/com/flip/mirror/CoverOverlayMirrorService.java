@@ -364,8 +364,41 @@ public class CoverOverlayMirrorService extends Service {
      * 自愈：每 3 秒确认控件条窗口还在，掉了就补。
      * 用户要求"写死再也不要动" —— 那就不靠任何一次性初始化，掉了自动回来。
      */
-    private void startBarWatchdogOnce() {
-        if (mBarWatchdog != null) {
+    /** 外屏(display 1)上一次的 Display 状态，用于做 OFF→ON 的边沿检测。 */
+    private int mLastCoverState = -1;
+
+    /**
+     * 亮屏自愈：**关屏会把双屏并发（device_state 4）撤掉**，而 WakeWatcher 的 SCREEN_ON
+     * 在 manifest 里收不到、闹钟又被退出流程 cancel 掉了 ⇒ 亮屏后外屏全黑（2026-11-12 实测）。
+     *
+     * <p>做法：不轮询 shell（贵），只读外屏的 {@link android.view.Display#getState()} 做边沿检测，
+     * 从「非 ON」变成「ON」时才补一次 `cmd device_state state 4`。
+     * 屏幕真的熄灭时不做任何事，不跟系统抢休眠。
+     */
+    private void healDualScreenIfNeeded() {
+        int st;
+        try {
+            android.hardware.display.DisplayManager dm =
+                    (android.hardware.display.DisplayManager) getSystemService(DISPLAY_SERVICE);
+            android.view.Display d = dm == null ? null : dm.getDisplay(1);
+            if (d == null) {
+                return;
+            }
+            st = d.getState();
+        } catch (Throwable t) {
+            return;
+        }
+        if (st == android.view.Display.STATE_ON && mLastCoverState != android.view.Display.STATE_ON) {
+            Log.i(TAG, "cover display ON (was " + mLastCoverState + "), re-apply dual screen");
+            new Thread(() -> {
+                boolean ok = Shell.execSync("cmd device_state state 4");
+                Log.i(TAG, "self-heal device_state 4 -> " + ok);
+            }, "heal-dual").start();
+        }
+        mLastCoverState = st;
+    }
+
+    private void startBarWatchdogOnce() {        if (mBarWatchdog != null) {
             return;   // 已经在跑，不重复起
         }
         startBarWatchdog();
@@ -392,6 +425,10 @@ public class CoverOverlayMirrorService extends Service {
                             mBar.bringToFront();
                         } catch (Throwable ignored) { }
                     }
+                    // 🔴 亮屏自愈：关屏会把双屏并发撤掉，亮屏后没人补 ⇒ 外屏全黑（2026-11-12 实测）
+                    try {
+                        healDualScreenIfNeeded();
+                    } catch (Throwable ignored) { }
                 } catch (Throwable ignored) { }
                 mBarWatchdog.postDelayed(this, 3000);
             }
@@ -440,7 +477,14 @@ public class CoverOverlayMirrorService extends Service {
             mScreenOn = new android.content.BroadcastReceiver() {
                 @Override
                 public void onReceive(android.content.Context c, Intent i) {
-                    if (i == null || !Intent.ACTION_SCREEN_ON.equals(i.getAction())) {
+                    // 亮屏与解锁都算「回到前台」：锁屏态下 SCREEN_ON 之后状态还可能再被复位一次
+                    String act = i == null ? null : i.getAction();
+                    if (!Intent.ACTION_SCREEN_ON.equals(act) && !Intent.ACTION_USER_PRESENT.equals(act)) {
+                        return;
+                    }
+                    // 🔴 用户已经明确退出（✕）时不要自己复活 —— 只补"本来就该在投"的场景
+                    if (!MirrorState.desired(CoverOverlayMirrorService.this)) {
+                        Log.i(TAG, "screen on: desired=false (user exited), skip recovery");
                         return;
                     }
                     // 启动后 15 秒内忽略：这段时间是我们自己刚把屏点亮的，
@@ -475,12 +519,14 @@ public class CoverOverlayMirrorService extends Service {
             };
             android.content.IntentFilter f =
                     new android.content.IntentFilter(Intent.ACTION_SCREEN_ON);
+            f.addAction(Intent.ACTION_USER_PRESENT);
+            // 🔴 2026-11-12 重新启用：关屏会撤掉双屏并发（device_state 回到 3），
+            //    而看门狗在主进程被冻结时观察不到 OFF→ON 的边沿 ⇒ 必须靠这条广播。
+            //    只做两件事：补 device_state 4；投影已死才重新申请（有 desired 闸，用户退出后不复活）。
             if (Build.VERSION.SDK_INT >= 33) {
-                // 看门狗已按用户要求停用
-                // registerReceiver(mScreenOn, f, android.content.Context.RECEIVER_NOT_EXPORTED);
+                registerReceiver(mScreenOn, f, android.content.Context.RECEIVER_NOT_EXPORTED);
             } else {
-                // 看门狗已停用
-                // registerReceiver(mScreenOn, f);
+                registerReceiver(mScreenOn, f);
             }
             Log.i(TAG, "screen-on recovery registered");
         } catch (Throwable t) {

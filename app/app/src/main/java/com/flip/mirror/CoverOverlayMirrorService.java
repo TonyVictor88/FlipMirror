@@ -1168,6 +1168,11 @@ public class CoverOverlayMirrorService extends Service {
             if (mBmp == null) {
                 return true;
             }
+            // 🔴 mDst 只在 onDraw 里赋值，首帧/重排期间可能是 (0,0,0,0)。
+            //    此时下面两行会算出 0f/0f = NaN，一路注入成 "NaN" 坐标。
+            if (mDst.width() <= 0 || mDst.height() <= 0) {
+                return true;
+            }
             // 画面坐标 → 内屏坐标
             // 注意：手指滑出画面区**不能直接 return** —— 那样 ACTION_UP 会丢，
             // 内屏认为手指一直按着，之后所有点击/滑动都被并进同一次手势
@@ -1201,7 +1206,15 @@ public class CoverOverlayMirrorService extends Service {
                     }
                     break;
                 case MotionEvent.ACTION_POINTER_DOWN:
+                    // 🔴 注入层是**单指模型**（TouchUserService 只用 MotionEvent.obtain 单点构造）。
+                    //    以前这里把 POINTER_DOWN 也当 ACTION_UP 处理 —— 第二根手指（或掌根）
+                    //    一落下就发一个 UP，内屏侧"按下+抬手"= 一次点击，整段滑动被吃掉。
+                    Log.i(TAG, "touch POINTER_DOWN ignored (single-pointer injector)");
+                    break;
                 case MotionEvent.ACTION_POINTER_UP:
+                    // 副指抬起同样不结束手势；真正的结束只认 ACTION_UP / ACTION_CANCEL
+                    Log.i(TAG, "touch POINTER_UP ignored");
+                    break;
                 case MotionEvent.ACTION_UP:
                 case MotionEvent.ACTION_CANCEL:
                     if (mGestureActive) {

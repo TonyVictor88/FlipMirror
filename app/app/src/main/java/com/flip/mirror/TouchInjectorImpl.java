@@ -35,6 +35,8 @@ public class TouchInjectorImpl implements TouchInjector {
     private long mDownTimeReal = 0L;
     private long mDownTime = 0;
     private long mLastMove = 0;
+    /** 本次手势的 DOWN 是否真的送出去了（没送出去就别再发 MOVE/UP）。 */
+    private boolean mGestureSent = false;
 
     // 常驻 shell 进程里的注入服务（反射经 Proxy 绑定，规避不同 Shizuku 版本的接口签名差异）
     private Object mSvc = null;
@@ -186,6 +188,13 @@ public class TouchInjectorImpl implements TouchInjector {
         }
         float[] p = map(srcX, srcY);
 
+        // 🔴 DOWN 没送出去时，后面的 MOVE / UP 都是孤儿事件：目标 App 收到"没有按下的移动"，
+        //    要么丢弃、要么把它当新的一次点击。整段直接丢掉，避免半截手势把内屏状态机搅乱
+        //    （表现就是"时灵时不灵"：启动/重连那一下 DOWN 丢了，整次滑动就废了）。
+        if (action != MotionEvent.ACTION_DOWN && !mGestureSent) {
+            return false;
+        }
+
         // 快通道：直连 UserService，事件走 binder 进 InputDispatcher，无进程 fork
         if (mSvc != null) {
             try {
@@ -196,7 +205,8 @@ public class TouchInjectorImpl implements TouchInjector {
                 long t = realEventTime > 0 ? realEventTime
                         : android.os.SystemClock.uptimeMillis();
                 int act = action == MotionEvent.ACTION_DOWN ? 0
-                        : action == MotionEvent.ACTION_UP ? 1 : 2;
+                        : action == MotionEvent.ACTION_UP ? 1
+                        : action == MotionEvent.ACTION_CANCEL ? 3 : 2;
                 if (action == MotionEvent.ACTION_DOWN) {
                     mDownTime = t;
                     mDownTimeReal = t;
@@ -206,6 +216,11 @@ public class TouchInjectorImpl implements TouchInjector {
                 java.lang.reflect.Method m = mSvc.getClass().getMethod("inject",
                         int.class, float.class, float.class, long.class, long.class, int.class);
                 m.invoke(mSvc, act, p[0], p[1], mDownTime, t, 0);
+                if (action == MotionEvent.ACTION_DOWN) {
+                    mGestureSent = true;
+                } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                    mGestureSent = false;
+                }
                 return true;
             } catch (Throwable e) {
                 Log.w(TAG, "svc inject failed: " + e.getMessage());
@@ -222,13 +237,19 @@ public class TouchInjectorImpl implements TouchInjector {
             if (action == MotionEvent.ACTION_DOWN) {
                 mDownX = p[0];
                 mDownY = p[1];
-                mDownTime = System.currentTimeMillis();
+                // 🔴 必须和快通道/上报的 eventTime 用同一个时钟（uptimeMillis）。
+                //    以前这里写 currentTimeMillis()，一旦手势中途从慢通道切到快通道，
+                //    downTime 是 epoch 毫秒、eventTime 是 uptime 毫秒，相差 1.7e12ms，
+                //    InputDispatcher 会把手势判成非法/新手势 → 滑到一半断掉。
+                mDownTime = android.os.SystemClock.uptimeMillis();
                 mLastMove = 0;
                 run("input -d 0 motionevent DOWN " + x + " " + y);
+                mGestureSent = true;
                 return true;
             }
-            if (action == MotionEvent.ACTION_UP) {
+            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
                 run("input -d 0 motionevent UP " + x + " " + y);
+                mGestureSent = false;
                 return true;
             }
             // MOVE：节流。每条命令约 100ms 开销，40ms 一次不至于把队列压死

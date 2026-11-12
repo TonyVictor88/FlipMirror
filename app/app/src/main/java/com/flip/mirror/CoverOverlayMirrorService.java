@@ -1185,12 +1185,12 @@ public class CoverOverlayMirrorService extends Service {
                     mDownX = sx; mDownY = sy; mMoveCount = 0;
                     Log.i(TAG, "touch DOWN view=" + (int) e.getX() + "," + (int) e.getY()
                             + " -> src=" + (int) sx + "," + (int) sy);
-                    mTouch.send(sx, sy, MotionEvent.ACTION_DOWN);
+                    mTouch.send(sx, sy, MotionEvent.ACTION_DOWN, e.getEventTime());
                     break;
                 case MotionEvent.ACTION_MOVE:
                     if (mGestureActive) {
                         mMoveCount++;
-                        mTouch.send(sx, sy, MotionEvent.ACTION_MOVE);
+                        mTouch.send(sx, sy, MotionEvent.ACTION_MOVE, e.getEventTime());
                     }
                     break;
                 case MotionEvent.ACTION_POINTER_DOWN:
@@ -1201,16 +1201,6 @@ public class CoverOverlayMirrorService extends Service {
                         mGestureActive = false;
                         float dx = sx - mDownX;
                         float dy2 = sy - mDownY;
-                        // 翻页"有概率成功"说明手势落在阈值边缘（掉帧或末速不足）。
-                        // UP 之前补两个跟随事件，把位移推过阈值，稳定性明显提升。
-                        if (Math.abs(dx) > 100 && Math.abs(dx) > Math.abs(dy2) * 1.5f) {
-                            float dir = dx > 0 ? 1f : -1f;
-                            float ext1 = Math.max(0f, Math.min(mSrcW, sx + dir * 40f));
-                            float ext2 = Math.max(0f, Math.min(mSrcW, sx + dir * 80f));
-                            mTouch.send(ext1, sy, MotionEvent.ACTION_MOVE);
-                            mTouch.send(ext2, sy, MotionEvent.ACTION_MOVE);
-                            sx = ext2;
-                        }
                         Log.i(TAG, "touch UP src=" + (int) sx + "," + (int) sy
                                 + " dx=" + (int) dx + " moves=" + mMoveCount);
                         // 屏幕回显：让用户直接看到手势有没有被我们收到
@@ -1220,7 +1210,7 @@ public class CoverOverlayMirrorService extends Service {
                             mSwipeHintUntil = android.os.SystemClock.elapsedRealtime() + 1500;
                             invalidate();
                         }
-                        mTouch.send(sx, sy, MotionEvent.ACTION_UP);
+                        mTouch.send(sx, sy, MotionEvent.ACTION_UP, e.getEventTime());
                     }
                     break;
                 default:

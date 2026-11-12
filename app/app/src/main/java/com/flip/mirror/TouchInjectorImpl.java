@@ -32,6 +32,7 @@ public class TouchInjectorImpl implements TouchInjector {
 
 
     private float mDownX = -1, mDownY = -1;
+    private long mDownTimeReal = 0L;
     private long mDownTime = 0;
     private long mLastMove = 0;
 
@@ -159,6 +160,11 @@ public class TouchInjectorImpl implements TouchInjector {
 
     @Override
     public boolean send(float srcX, float srcY, int action) {
+        return send(srcX, srcY, action, 0L);
+    }
+
+    @Override
+    public boolean send(float srcX, float srcY, int action, long realEventTime) {
         // 惰性重试：Shizuku 授权可能晚到，别只判一次
         if (!mReady) {
             long now = System.currentTimeMillis();
@@ -183,11 +189,17 @@ public class TouchInjectorImpl implements TouchInjector {
         // 快通道：直连 UserService，事件走 binder 进 InputDispatcher，无进程 fork
         if (mSvc != null) {
             try {
-                long t = android.os.SystemClock.uptimeMillis();
+                // 🔴 关键：用**原始触摸事件的时间戳**，不是发送时刻。
+                // 之前每个事件都取 uptimeMillis()，一批 MOVE 落在同一毫秒里，
+                // 内屏算出的滑动速度是假的（要么无穷大要么 0）→ 翻页判定时灵时不灵，
+                // 且方向不对称（超速冲到底页就"回不去"）。
+                long t = realEventTime > 0 ? realEventTime
+                        : android.os.SystemClock.uptimeMillis();
                 int act = action == MotionEvent.ACTION_DOWN ? 0
                         : action == MotionEvent.ACTION_UP ? 1 : 2;
                 if (action == MotionEvent.ACTION_DOWN) {
                     mDownTime = t;
+                    mDownTimeReal = t;
                     mDownX = p[0];
                     mDownY = p[1];
                 }

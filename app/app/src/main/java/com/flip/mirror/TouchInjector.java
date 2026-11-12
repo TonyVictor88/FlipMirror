@@ -24,6 +24,9 @@ public interface TouchInjector {
      */
     boolean send(float srcX, float srcY, int action);
 
+    /** 带真实触摸时间戳的重载：注入必须沿用原事件时间，否则系统算出的速度是假的。 */
+    boolean send(float srcX, float srcY, int action, long eventTime);
+
     /** 释放资源（关闭 uinput 设备）。 */
     void release();
 

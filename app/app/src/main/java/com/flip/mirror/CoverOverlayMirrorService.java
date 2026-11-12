@@ -86,6 +86,8 @@ public class CoverOverlayMirrorService extends Service {
     private MediaProjection mProjection;
     private VirtualDisplay mVirtualDisplay;
     private ImageReader mReader;
+    /** 已收到的帧数（只在启动阶段打点，用来判断采集到底有没有出帧）。 */
+    private int mFrameCount = 0;
     private HandlerThread mThread;
 
     private WindowManager mWm;
@@ -663,7 +665,8 @@ public class CoverOverlayMirrorService extends Service {
                 int iw = st.innerWidth(), ih = st.innerHeight(), idpi = st.innerDpi();
                 // 合理性兜底（读到脏值才回落）。注意别再拿 1600x1398 当基准 —— 那个值会让系统整屏缩放。
                 if (iw < 700 || ih < 600) { iw = 1080; ih = 944; }
-                if (idpi < 400) { idpi = 480; }
+                // 合理性兜底：324 是正常值（等效 533dp），别再用 400 当前提把它顶回 480。
+                if (idpi < 200 || idpi > 640) { idpi = 324; }
                 Log.i(TAG, "prep size " + iw + "x" + ih + " @" + idpi);
                 String prep = "cmd device_state state 4; sleep 0.8; wm size "
                         + iw + "x" + ih + "; wm density " + idpi;
@@ -686,11 +689,11 @@ public class CoverOverlayMirrorService extends Service {
                 Log.i(TAG, "inner size (from wm) = " + mSrcW + "x" + mSrcH);
             }
 
-            // 采集分辨率取 3/4（1080x944 → 810x708）：
-            // 外屏内容区 748x654，810 略高于它 ⇒ 显示时轻微缩小，不会糊；
-            // 而每帧内存 810*708*4 ≈ 2.3MB，与旧版（800x699）持平，不额外压内存。
-            int capW = Math.max(1, mSrcW * 3 / 4);
-            int capH = Math.max(1, mSrcH * 3 / 4);
+            // 采集用**全分辨率 1:1**（1080x944 → 1080x944）：
+            // wm size 已经是和物理面板 1:1 渲染（scale=1.0），所以这就是这块屏能拿到的最高清晰度；
+            // 显示时缩到外屏内容区 748x654（0.69 倍），比"减半采集再放大"更锐利。
+            int capW = Math.max(1, mSrcW);
+            int capH = Math.max(1, mSrcH);
             mReader = ImageReader.newInstance(capW, capH, PixelFormat.RGBA_8888, 2);
 
             mThread = new HandlerThread("flip-overlay-capture");
@@ -728,6 +731,10 @@ public class CoverOverlayMirrorService extends Service {
                         bmp.copyPixelsFromBuffer(ByteBuffer.wrap(dst));
                     }
                     final Bitmap out = bmp;
+                    mFrameCount++;
+                    if (mFrameCount == 1 || mFrameCount % 120 == 0) {
+                        Log.i(TAG, "frame in: n=" + mFrameCount + " " + capW + "x" + capH);
+                    }
                     new Handler(getMainLooper()).post(() -> {
                         if (mView != null) {
                             mView.setBitmap(out);
@@ -999,6 +1006,8 @@ public class CoverOverlayMirrorService extends Service {
         private int mMoveCount = 0;
         private long mSwipeHintUntil = 0;
         private String mSwipeHintText = "";
+        /** 手势黄字回显开关：默认关（V 2026-11-12 要求关掉），要复现时把 debug_log 打开即可。 */
+        private boolean mDebugHint = false;
 
         /** 界面是否 180° 翻转（触摸坐标需要镜像）。 */
         private boolean mFlipTouch = false;
@@ -1123,7 +1132,9 @@ public class CoverOverlayMirrorService extends Service {
             if (now - mCornerReadAt > 1000) {
                 mCornerReadAt = now;
                 try {
-                    mShowTrCorner = new SettingsStore(getContext()).cornerMaskOn();
+                    SettingsStore ss = new SettingsStore(getContext());
+                    mShowTrCorner = ss.cornerMaskOn();
+                    mDebugHint = ss.debugLog();
                 } catch (Throwable ignored) { }
             }
             float trR = mShowTrCorner ? CARD_RADIUS : 0f;
@@ -1145,8 +1156,8 @@ public class CoverOverlayMirrorService extends Service {
             }
             canvas.restore();
         
-            // 手势回显（诊断用）
-            if (mSwipeHintUntil > 0 && android.os.SystemClock.elapsedRealtime() < mSwipeHintUntil) {
+            // 手势回显（诊断用，默认关；debugLog 打开才会画）
+            if (mDebugHint && mSwipeHintUntil > 0 && android.os.SystemClock.elapsedRealtime() < mSwipeHintUntil) {
                 canvas.drawRect(0, h - 90, w, h, mHintBg);
                 canvas.drawText(mSwipeHintText, w / 2f, h - 42, mHintTextCenter);
                 postInvalidateDelayed(200);
@@ -1238,7 +1249,7 @@ public class CoverOverlayMirrorService extends Service {
                         Log.i(TAG, "touch UP src=" + (int) sx + "," + (int) sy
                                 + " dx=" + (int) dx + " moves=" + mMoveCount);
                         // 屏幕回显：让用户直接看到手势有没有被我们收到
-                        if (Math.abs(dx) > 120) {
+                        if (mDebugHint && Math.abs(dx) > 120) {
                             mSwipeHintText = (dx > 0 ? "收到 →" : "收到 ←") + " dx=" + (int) dx
                                     + " moves=" + mMoveCount;
                             mSwipeHintUntil = android.os.SystemClock.elapsedRealtime() + 1500;

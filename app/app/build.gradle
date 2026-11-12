@@ -2,6 +2,17 @@ plugins {
     id 'com.android.application'
 }
 
+// 🔴 release 签名从 local.properties 读（该文件在 .gitignore 里，keystore 本身放在仓库外
+//    H:/AI PG/FlipMirror-keys/）。以前 release 用的是 Android debug 证书，换机/重装后
+//    升级链就断了（INSTALL_FAILED_UPDATE_INCOMPATIBLE）。
+//    local.properties 缺这几项时自动回落到 debug 签名，保证别人克隆下来也能构建。
+def localProps = new Properties()
+def localPropsFile = rootProject.file('local.properties')
+if (localPropsFile.exists()) {
+    localPropsFile.withInputStream { localProps.load(it) }
+}
+def hasReleaseKey = localProps.getProperty('flip.keystore.file') != null
+
 android {
     buildFeatures {
         aidl true
@@ -13,14 +24,25 @@ android {
         applicationId "com.flip.mirror"
         minSdk 34
         targetSdk 34
-        versionCode 303
-        versionName "2.2.5"
+        versionCode 304
+        versionName "2.2.6"
+    }
+
+    signingConfigs {
+        release {
+            if (hasReleaseKey) {
+                storeFile file(localProps.getProperty('flip.keystore.file'))
+                storePassword localProps.getProperty('flip.keystore.password')
+                keyAlias localProps.getProperty('flip.keystore.alias')
+                keyPassword localProps.getProperty('flip.keystore.password')
+            }
+        }
     }
 
     buildTypes {
         release {
             minifyEnabled false
-            signingConfig signingConfigs.debug
+            signingConfig hasReleaseKey ? signingConfigs.release : signingConfigs.debug
         }
     }
 

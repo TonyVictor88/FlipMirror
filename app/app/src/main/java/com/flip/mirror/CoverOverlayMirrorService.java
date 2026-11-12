@@ -667,6 +667,13 @@ public class CoverOverlayMirrorService extends Service {
                 // （实测 Display.getRealMetrics 会返回旧值 960x924，导致只抓到 480x462。）
                 mSrcW = iw;
                 mSrcH = ih;
+                // 🔴 同步刷新注入层 geometry：它的 map() 会把坐标裁到 mDstW。
+                // showOverlay 里调 setGeometry 时 mSrcW 还是 Display 旧值(1282)，
+                // 画布却按 1600 发坐标 ⇒ x>1282 的 MOVE 被裁平、速度归零
+                // ⇒ 左→右滑永远不翻页（右→左终点小所以正常）。
+                if (MirrorCanvasView.sTouch != null) {
+                    MirrorCanvasView.sTouch.setGeometry(iw, ih, iw, ih);
+                }
                 Log.i(TAG, "inner size (from wm) = " + mSrcW + "x" + mSrcH);
             }
 

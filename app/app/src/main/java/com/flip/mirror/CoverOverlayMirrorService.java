@@ -914,11 +914,13 @@ public class CoverOverlayMirrorService extends Service {
                 // 结论（今天验证到底）：外屏首页 SubHome **只在单屏模式(state 1)下存在**。
                 // 一旦回到双屏并发(state 4)，外屏就是块"空地"，只有壁纸。
                 // 所以退出只能停在 state 1 —— 首页正常；要再投屏时由入口页重新置 4。
-                // 🔴 2026-11-12 追加：退出时必须**还原 wm 覆盖**。
-                //    以前全仓没有一处 wm reset，退出/崩溃后内屏永久停在 1600x1398（系统整屏缩放 0.675），
-                //    连"横向滑动失效"都是这个覆盖值的后遗症。复位后内屏回到原生 1080x1920。
+                // ⚠️ 这里**不能**做 wm size reset（2026-11-12 撤销，v2.2.5 加过一版）：
+                //    退出只是"隐藏窗口"，再进来走 showAgain() 复用同一个窗口，两者是异步的 ——
+                //    reset 常常落在"再进入已经 prep 完"之后，于是新会话带着原生 1080x1920 跑，
+                //    画面变成竖屏塞进横屏画框（V 实测：退出去又回来，分辨率变原生）。
+                //    内屏面板已损坏、且会话本来就需要这个覆盖，保持不动才是对的。
                 boolean ok = Shell.execSync(
-                        "cmd device_state state 1; wm size reset; wm density reset; sleep 0.4; "
+                        "cmd device_state state 1; sleep 0.4; "
                         + "am start --display 1 -n com.tianweixing.atianwidget/.PowerAssistActivity");
                 Log.i(TAG, "hide: home on cover -> " + ok);
             }, "hide-home").start();

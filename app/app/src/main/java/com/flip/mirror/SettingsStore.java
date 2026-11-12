@@ -70,7 +70,10 @@ public class SettingsStore {
     //    实测该缩放下**横向滑动在屏幕上半区失效**（左右滑不动桌面的根因）。
     public int innerWidth()   { return getInt(K_INNER_W, 1080); }
     public int innerHeight()  { return getInt(K_INNER_H, 944); }
-    public int innerDpi()     { return getInt(K_INNER_DPI, 480); }
+    // 🔴 324 是为了「观感等同于旧的 1600×1398@480」而算出来的，不是随手取的：
+    //    dp 宽度 = 逻辑宽 ÷ (dpi/160)。旧配置 1600 ÷ 3 = 533dp；新配置 1080 ÷ (324/160) = 533dp。
+    //    两者布局完全一致（状态栏不挤、网格同列数），但新配置是 1:1 渲染、无系统缩放。
+    public int innerDpi()     { return getInt(K_INNER_DPI, 324); }
     public String scaleMode() { return getStr(K_SCALE_MODE, "适应"); }
     public int fps()          { return getInt(K_FPS, 60); }
 

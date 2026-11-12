@@ -663,7 +663,11 @@ public class CoverOverlayMirrorService extends Service {
                 try {
                     Thread.sleep(1200);
                 } catch (InterruptedException ignored) { }
-                refreshSrcSize();
+                // wm size 刚由我们自己设成 iw x ih —— 直接采用，不去读 Display。
+                // （实测 Display.getRealMetrics 会返回旧值 960x924，导致只抓到 480x462。）
+                mSrcW = iw;
+                mSrcH = ih;
+                Log.i(TAG, "inner size (from wm) = " + mSrcW + "x" + mSrcH);
             }
 
             // 采集分辨率减半，降低内存与拷贝开销；显示时再放大到内容区

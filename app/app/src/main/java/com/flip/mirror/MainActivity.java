@@ -267,6 +267,10 @@ public class MainActivity extends Activity {
         selfCheck.setText("① 自检");
         selfCheck.setAllCaps(false);
 
+        // ⚠️ 这里**不 addView**：真正往 row1 里加的是下面那段（"cell/cell2…"）。
+        // 2026-11-13 我就是在这里又建了一行、又 root.addView，导致同一个 Button
+        // 被两个父容器争，冷启动直接崩：
+        //   IllegalStateException: The specified child already has a parent
         Button repair = new Button(this);
         mRepair = repair;
         styleFlat(repair, 0xFF7A4A1E);
@@ -274,23 +278,6 @@ public class MainActivity extends Activity {
         repair.setAllCaps(false);
         repair.setEnabled(false);      // 没跑过自检之前不允许点，避免"盲修"
         repair.setOnClickListener(v -> runRepair());
-
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, Math.round(54 * d));
-        rowLp.setMargins(0, Math.round(7 * d), 0, Math.round(7 * d));
-        row.setLayoutParams(rowLp);
-        LinearLayout.LayoutParams halfLp = new LinearLayout.LayoutParams(
-                0, LinearLayout.LayoutParams.MATCH_PARENT, 1f);
-        selfCheck.setLayoutParams(halfLp);
-        LinearLayout.LayoutParams halfLp2 = new LinearLayout.LayoutParams(
-                0, LinearLayout.LayoutParams.MATCH_PARENT, 1f);
-        halfLp2.leftMargin = Math.round(8 * d);
-        repair.setLayoutParams(halfLp2);
-        row.addView(selfCheck);
-        row.addView(repair);
-        root.addView(row);
         selfCheck.setOnClickListener(v -> runSelfCheck());
 
 
@@ -357,6 +344,10 @@ public class MainActivity extends Activity {
                 0, LinearLayout.LayoutParams.MATCH_PARENT, 1f);
         cell.setMargins(Math.round(6 * d), Math.round(6 * d), Math.round(6 * d), Math.round(6 * d));
         row1.addView(mSelfCheck, cell);
+        LinearLayout.LayoutParams cellRepair = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.MATCH_PARENT, 1f);
+        cellRepair.setMargins(Math.round(6 * d), Math.round(6 * d), Math.round(6 * d), Math.round(6 * d));
+        row1.addView(mRepair, cellRepair);
         LinearLayout.LayoutParams cell2 = new LinearLayout.LayoutParams(
                 0, LinearLayout.LayoutParams.MATCH_PARENT, 1f);
         cell2.setMargins(Math.round(6 * d), Math.round(6 * d), Math.round(6 * d), Math.round(6 * d));
@@ -803,8 +794,9 @@ public class MainActivity extends Activity {
             }
             if (mRepair != null) {
                 mRepair.setEnabled(fails != 0);
+                // 标签要短：三个按钮平分 748px，写成「② 修复（1 项）」会被截成「② 修复（1」
                 mRepair.setText(fails != 0
-                        ? "② 修复（" + Integer.bitCount(fails) + " 项）" : "② 修复");
+                        ? "② 修复·" + Integer.bitCount(fails) : "② 修复");
             }
         });
     }

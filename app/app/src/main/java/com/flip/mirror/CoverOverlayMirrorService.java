@@ -489,9 +489,58 @@ public class CoverOverlayMirrorService extends Service {
             new Thread(() -> {
                 boolean ok = Shell.execSync("cmd device_state state 4");
                 Log.i(TAG, "self-heal device_state 4 -> " + ok);
+                // 亮屏时顺手压一次防误触（它会在亮屏瞬间弹出来，把触摸吞掉）
+                boolean ok2 = Shell.execSync("settings put system screen_off_pocket 0");
+                Log.i(TAG, "self-heal screen_off_pocket 0 -> " + ok2);
             }, "heal-dual").start();
         }
         mLastCoverState = st;
+    }
+
+    /** 外屏旋转（0/1/2/3）上一次读到的值，变了就要重排控件条。 */
+    private int mLastRotation = -1;
+
+    /**
+     * 方向自适应：外屏的逻辑旋转会变（阿田把外屏转了 180°，实测 `orientation=2`；
+     * 折叠/展开时也可能变），控件条和圆角遮罩必须跟着重排，否则会跑到用户看不见的那条边。
+     *
+     * <p>只做**检测 + 重排**，不猜几何：绘制仍在逻辑坐标系里做，系统会按 rotation 摆正。
+     */
+    private void checkRotation() {
+        int r;
+        try {
+            android.hardware.display.DisplayManager dm =
+                    (android.hardware.display.DisplayManager) getSystemService(DISPLAY_SERVICE);
+            android.view.Display d1 = dm == null ? null : dm.getDisplay(1);
+            if (d1 == null) {
+                return;
+            }
+            r = d1.getRotation();
+        } catch (Throwable t) {
+            return;
+        }
+        if (r == mLastRotation) {
+            return;
+        }
+        Log.i(TAG, "cover rotation " + mLastRotation + " -> " + r + ", re-layout bar");
+        mLastRotation = r;
+        if (mWm != null && mRoot != null) {
+            // 重排：先按当前 rotation 更新翻转，再把控件条摘掉重建（几何写死的部分跟着走）
+            try {
+                applyFlipIfNeeded();
+            } catch (Throwable ignored) { }
+            try {
+                if (mBar != null) {
+                    mWm.removeView(mBar);
+                    mBar = null;
+                }
+            } catch (Throwable ignored) { }
+            try {
+                if (!new SettingsStore(this).cleanUi()) {
+                    addControlBar();
+                }
+            } catch (Throwable ignored) { }
+        }
     }
 
     private void startBarWatchdogOnce() {        if (mBarWatchdog != null) {
@@ -530,6 +579,10 @@ public class CoverOverlayMirrorService extends Service {
                         if (++mTick % 10 == 0) {
                             checkGeometryDrift();
                         }
+                    } catch (Throwable ignored) { }
+                    // 方向自适应：外屏 rotation 一变就重排控件条（阿田把它转了 180°，orientation=2）
+                    try {
+                        checkRotation();
                     } catch (Throwable ignored) { }
                 } catch (Throwable ignored) { }
                 mBarWatchdog.postDelayed(this, 3000);
@@ -817,6 +870,11 @@ public class CoverOverlayMirrorService extends Service {
                 if (idpi < 200 || idpi > 640) { idpi = 324; }
                 Log.i(TAG, "prep size " + iw + "x" + ih + " @" + idpi);
                 String prep = "cmd device_state state 4; appops set com.flip.mirror PROJECT_MEDIA allow; "
+                        // 🔴 2026-11-13：三星「防误触保护」全屏页会把触摸全吞掉（实测整屏变成
+                        //    「防误触保护 / 向上滑动可解除」），而它不是 Activity、没有组件名可判。
+                        //    它的总开关是 system 里的 screen_off_pocket（放口袋熄屏/防误触），
+                        //    这里每次启动顺手关掉 —— 本机是当桌面屏用的，不需要口袋保护。
+                        + "settings put system screen_off_pocket 0; "
                         + "sleep 0.8; wm size "
                         + iw + "x" + ih + "; wm density " + idpi;
                 boolean ok = Shell.execSync(prep);

@@ -1009,7 +1009,8 @@ public class CoverOverlayMirrorService extends Service {
                     //    把 GC 逼到不停跑（发热/掉帧）。现在两张图交替用，「在画的那张」和「在写的那张」
                     //    永远是不同的一张，配合上面的 pending 闸，不需要第三张。
                     Bitmap bmp = mFrameUseA ? mFrameBufA : mFrameBufB;
-                    if (bmp == null) {
+                    if (bmp == null || bmp.isRecycled()) {
+                        // 被谁 recycle 过就重建（防御：宁可重建也不能每帧抛异常）
                         bmp = Bitmap.createBitmap(capW, capH, Bitmap.Config.ARGB_8888);
                         if (mFrameUseA) {
                             mFrameBufA = bmp;
@@ -1433,7 +1434,13 @@ public class CoverOverlayMirrorService extends Service {
             Bitmap old = mBmp;
             mBmp = b;
             invalidate();
-            if (old != null && old != b && !old.isRecycled()) {
+            // 🔴 这里**不能** recycle 旧帧（2026-11-13 修）：
+            //    改成双缓冲复用之后，old 往往正是"下一帧要写的那张"，
+            //    recycle 掉下一帧 copyPixelsFromBuffer 立刻抛
+            //    "called on recycled bitmap" → 隔帧丢 → 滑动明显变卡（实测 485 次/分钟）。
+            //    Bitmap 从 Android 8 起由 GC 管理，本来也不需要手动 recycle。
+            if (old != null && old != b && old != mFrameBufA && old != mFrameBufB
+                    && !old.isRecycled()) {
                 old.recycle();
             }
         }

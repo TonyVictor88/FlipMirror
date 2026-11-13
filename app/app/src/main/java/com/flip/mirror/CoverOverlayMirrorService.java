@@ -397,7 +397,7 @@ public class CoverOverlayMirrorService extends Service {
         if (mExpectW <= 0 || mExpectH <= 0) {
             return;
         }
-        int w = -1, h = -1;
+        int w = -1, h = -1, dpi = -1;
         try {
             android.hardware.display.DisplayManager dm =
                     (android.hardware.display.DisplayManager) getSystemService(DISPLAY_SERVICE);
@@ -409,14 +409,17 @@ public class CoverOverlayMirrorService extends Service {
             d0.getRealMetrics(m);
             w = m.widthPixels;
             h = m.heightPixels;
+            dpi = m.densityDpi;
         } catch (Throwable t) {
             return;
         }
-        if (w == mExpectW && h == mExpectH) {
+        // 🔴 密度也要一起比（2026-11-13）：只比宽高的话，密度被别人改掉（实测出现过 340、324 反复）
+        //    守卫看不见 —— 而密度错会直接改变 dp 宽度，界面排版就变了。
+        if (w == mExpectW && h == mExpectH && (mExpectDpi <= 0 || dpi == mExpectDpi)) {
             return;
         }
-        Log.w(TAG, "geometry drift: actual " + w + "x" + h
-                + " != expect " + mExpectW + "x" + mExpectH + " -> re-apply");
+        Log.w(TAG, "geometry drift: actual " + w + "x" + h + "@" + dpi
+                + " != expect " + mExpectW + "x" + mExpectH + "@" + mExpectDpi + " -> re-apply");
         final int rw = mExpectW, rh = mExpectH, rd = mExpectDpi;
         new Thread(() -> {
             boolean ok = Shell.execSync("wm size " + rw + "x" + rh + "; wm density " + rd);

@@ -74,6 +74,9 @@ public class MainActivity extends Activity {
 
     private Button mSelfCheck, mGo, mSettings, mBackHome;
     private Button mRepair;
+    /** 自检明细的滚动区（明细再长也不挤按钮）。 */
+    private android.widget.ScrollView mReportScroll;
+    private TextView mReportText;
     /** 上次自检发现的问题位（只修这些；0 = 全绿）。**只有点「② 修复」才会动**。 */
     private volatile int mFails = 0;
 
@@ -256,6 +259,28 @@ public class MainActivity extends Activity {
         mStatus.setTextSize(13);
         mStatus.setPadding(0, pad, 0, pad);
         root.addView(mStatus);
+
+        // 🔴 自检明细放进**独立可滚动区域**（2026-11-13 V 反馈：明细直接塞进上面那行
+        //    会把下面的按钮顶出屏幕）。这里给 weight=1：明细再长也只在自己这块里滚，
+        //    按钮行始终保持固定高度、始终可见。
+        android.widget.ScrollView sv = new android.widget.ScrollView(this);
+        mReportScroll = sv;
+        sv.setFillViewport(true);
+        sv.setVerticalScrollBarEnabled(true);
+        LinearLayout.LayoutParams svLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f);
+        svLp.setMargins(0, Math.round(4 * d), 0, Math.round(4 * d));
+        sv.setLayoutParams(svLp);
+        TextView rep = new TextView(this);
+        mReportText = rep;
+        rep.setTextColor(0xFFCCD3DC);
+        rep.setTextSize(13);
+        rep.setLineSpacing(0, 1.2f);
+        rep.setTextIsSelectable(true);
+        sv.addView(rep, new android.widget.FrameLayout.LayoutParams(
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                android.widget.FrameLayout.LayoutParams.WRAP_CONTENT));
+        root.addView(sv);
 
         // 主操作按钮：外屏小屏，做大做高
         // 🔴 启动前自检：通过 Termux 的 RUN_COMMAND 接口执行 flip-prep.sh
@@ -684,8 +709,11 @@ public class MainActivity extends Activity {
      *   ③ 双屏并发已置上（cmd device_state state 4）
      */
     private void runSelfCheck() {
+        if (mReportText != null) {
+            mReportText.setText("自检中…（只读，不改任何东西）");
+        }
         if (mStatus != null) {
-            mStatus.setText("自检中…（只读，不改任何东西）");
+            mStatus.setText("当前 display = " + (getDisplay() != null ? getDisplay().getDisplayId() : -1));
         }
         new Thread(() -> {
             StringBuilder sb = new StringBuilder();
@@ -727,23 +755,25 @@ public class MainActivity extends Activity {
             }
             sb.append("\n").append(dualOk ? "✅ 双屏并发已开" : "❌ 双屏并发掉了（外屏会黑）");
 
-            // ④ 内屏尺寸
+            // ④ 内屏尺寸（期望值来自**设置**，不能硬编码 —— 用户在设置里改过就会永远报红）
+            SettingsStore sett = new SettingsStore(this);
+            final int expW = sett.innerWidth(), expH = sett.innerHeight(), expDpi = sett.innerDpi();
             String sz = Shell.execOut("wm size");
-            boolean sizeOk = sz != null && sz.contains("1080x944");
+            boolean sizeOk = sz != null && sz.contains(expW + "x" + expH);
             if (!sizeOk) {
                 fails |= F_SIZE;
             }
-            sb.append("\n").append(sizeOk ? "✅ 内屏尺寸 1080x944"
-                    : "❌ 尺寸不对：" + oneLine(sz));
+            sb.append("\n").append(sizeOk ? "✅ 内屏尺寸 " + expW + "x" + expH
+                    : "❌ 尺寸不对（期望 " + expW + "x" + expH + "）：" + oneLine(sz));
 
             // ⑤ 内屏密度
             String dn = Shell.execOut("wm density");
-            boolean densOk = dn != null && dn.contains("324");
+            boolean densOk = dn != null && dn.contains(String.valueOf(expDpi));
             if (!densOk) {
                 fails |= F_DENS;
             }
-            sb.append("\n").append(densOk ? "✅ 内屏密度 324"
-                    : "❌ 密度不对：" + oneLine(dn));
+            sb.append("\n").append(densOk ? "✅ 内屏密度 " + expDpi
+                    : "❌ 密度不对（期望 " + expDpi + "）：" + oneLine(dn));
 
             // ⑥ 防误触（三星那层全屏页会吞掉全部触摸）
             String pk = Shell.execOut("settings get system screen_off_pocket");
@@ -765,6 +795,10 @@ public class MainActivity extends Activity {
 
             // ⑧ 输入手势卡死（2026-11-13 那次"触摸全失效"的真因）
             String inp = Shell.execOut("dumpsys input");
+            // 留一条长度日志：读全了才有判据（本机实测 dumpsys input ≈ 93 KB）。
+            // 若这里打出几 KB，说明读输出被截断，卡死手势会被假报成正常。
+            Log.i(TAG, "self-check: dumpsys input = "
+                    + (inp == null ? "读不到" : inp.length() + " 字符"));
             boolean gestureOk = inp != null && !hasStuckGesture(inp);
             if (!gestureOk) {
                 fails |= F_GESTURE;
@@ -789,8 +823,14 @@ public class MainActivity extends Activity {
         Log.i(TAG, "self-check " + (fails == 0 ? "PASS" : "FAIL(" + fails + ")") + " | "
                 + msg.replace("\n", " / "));
         runOnUiThread(() -> {
+            if (mReportText != null) {
+                mReportText.setText(msg);
+            }
+            if (mReportScroll != null) {
+                mReportScroll.scrollTo(0, 0);
+            }
             if (mStatus != null) {
-                mStatus.setText(msg);
+                mStatus.setText(fails == 0 ? "自检通过" : ("有 " + Integer.bitCount(fails) + " 项异常"));
             }
             if (mRepair != null) {
                 mRepair.setEnabled(fails != 0);
@@ -852,8 +892,10 @@ public class MainActivity extends Activity {
                         ? "✅ 双屏并发已重开\n" : "❌ 双屏并发仍失败\n");
             }
             if ((fails & F_SIZE) != 0 || (fails & F_DENS) != 0) {
-                boolean ok = Shell.execSync("wm size 1080x944; wm density 324");
-                log.append(ok ? "✅ 内屏尺寸/密度已重设\n" : "❌ 尺寸/密度重设失败\n");
+                SettingsStore st = new SettingsStore(MainActivity.this);
+                boolean ok = Shell.execSync("wm size " + st.innerWidth() + "x" + st.innerHeight()
+                        + "; wm density " + st.innerDpi());
+                log.append(ok ? "✅ 内屏尺寸/密度已按设置重设\n" : "❌ 尺寸/密度重设失败\n");
             }
             if ((fails & F_POCKET) != 0) {
                 log.append(Shell.execSync("settings put system screen_off_pocket 0")

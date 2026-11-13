@@ -145,41 +145,48 @@ public final class Shell {
         }
     }
 
-    /** 读进程输出（上限 3 秒，防 dumpsys 卡死）。 */
+    /**
+     * 读进程输出（上限 4 秒）。
+     *
+     * 🔴 必须**读到 EOF**，不能"暂时没数据就当读完了"（2026-11-13 修）：
+     *    `dumpsys input` 输出 92 KB，`TouchStatesByDisplay` 在 22% 处（约 20 KB）；
+     *    原来用 {@code available()==0} 判断收工，管道稍有间隙就提前结束，
+     *    结果只读到几 KB —— 卡死手势那一节根本没进来，自检会**假报正常**。
+     *    现在用一个读线程阻塞读到 -1，主线程 join 4 秒后强制 destroy 兜底。
+     */
     private static String readAll(Process p) {
-        java.io.InputStream in = null;
+        final java.io.InputStream in;
         try {
             in = p.getInputStream();
-            java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
-            byte[] buf = new byte[4096];
-            long deadline = android.os.SystemClock.elapsedRealtime() + 3000;
-            while (android.os.SystemClock.elapsedRealtime() < deadline) {
-                int avail = in.available();
-                if (avail > 0) {
-                    int n = in.read(buf, 0, Math.min(avail, buf.length));
-                    if (n > 0) {
-                        bos.write(buf, 0, n);
-                    }
-                } else {
-                    if (bos.size() > 0) {
-                        break;   // 已经读到内容且暂时没更多，收工
-                    }
-                    Thread.sleep(40);
+        } catch (Throwable t) {
+            return null;
+        }
+        final java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+        Thread reader = new Thread(() -> {
+            byte[] buf = new byte[8192];
+            try {
+                int n;
+                while ((n = in.read(buf)) != -1) {
+                    bos.write(buf, 0, n);
                 }
-            }
+            } catch (Throwable ignored) { }
+        }, "exec-out-read");
+        reader.setDaemon(true);
+        reader.start();
+        try {
+            reader.join(8000);
+        } catch (InterruptedException ignored) { }
+        try {
+            p.destroy();          // 超时或已结束：关流让读线程退出来
+        } catch (Throwable ignored) { }
+        try {
+            in.close();
+        } catch (Throwable ignored) { }
+        try {
             String s = new String(bos.toByteArray(), "UTF-8");
             return s.isEmpty() ? null : s;
         } catch (Throwable t) {
             return null;
-        } finally {
-            try {
-                if (in != null) {
-                    in.close();
-                }
-            } catch (Throwable ignored) { }
-            try {
-                p.destroy();
-            } catch (Throwable ignored) { }
         }
     }
 

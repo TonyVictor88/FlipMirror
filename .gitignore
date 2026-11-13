@@ -32,3 +32,6 @@ Thumbs.db
 _tmp/
 
 # Termux scripts are kept (they are part of the setup guide)
+
+# 调试截图/临时脚本，不入库（2026-11-13）
+_diag/

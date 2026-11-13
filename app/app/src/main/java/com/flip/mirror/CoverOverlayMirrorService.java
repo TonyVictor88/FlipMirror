@@ -88,6 +88,15 @@ public class CoverOverlayMirrorService extends Service {
     private ImageReader mReader;
     /** 已收到的帧数（只在启动阶段打点，用来判断采集到底有没有出帧）。 */
     private int mFrameCount = 0;
+    /** 双缓冲：两张 Bitmap 交替写，避免每帧 createBitmap（4.08MB/帧）。 */
+    private Bitmap mFrameBufA, mFrameBufB;
+    private boolean mFrameUseA = true;
+    /** 行填充模式下复用的缓冲（否则每帧再分配一次 4MB）。 */
+    private byte[] mRowDst, mRowBytes;
+    /** 已有一帧排在主线程队列里未消费：为 true 时新帧直接丢（只保留最新一帧的意图）。 */
+    private volatile boolean mFramePending = false;
+    /** 单一主线程 Handler（原来每帧 new 一个）。 */
+    private android.os.Handler mMainHandler;
     private HandlerThread mThread;
 
     private WindowManager mWm;
@@ -627,8 +636,38 @@ public class CoverOverlayMirrorService extends Service {
         }
     }
 
-    private void registerScreenOnRecovery() {
+    /**
+     * 需要时才取唤醒锁：退出（隐藏）时放掉、回来再取。
+     * 复用同一个 WakeLock 实例（{@code setReferenceCounted(false)} 已设，重复 acquire 安全）。
+     */
+    private void acquireWakeLockIfNeeded() {
         try {
+            if (mWakeLock == null) {
+                acquireWakeLock();
+                return;
+            }
+            if (!mWakeLock.isHeld()) {
+                mWakeLock.acquire();
+                Log.i(TAG, "wake lock re-acquired");
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "re-acquire wake lock failed: " + t);
+        }
+    }
+
+    /** 放掉唤醒锁（不清引用，下次 showAgain 直接复用）。 */
+    private void releaseWakeLock() {
+        try {
+            if (mWakeLock != null && mWakeLock.isHeld()) {
+                mWakeLock.release();
+                Log.i(TAG, "wake lock released");
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "release wake lock failed: " + t);
+        }
+    }
+
+    private void registerScreenOnRecovery() {        try {
             mScreenOn = new android.content.BroadcastReceiver() {
                 @Override
                 public void onReceive(android.content.Context c, Intent i) {
@@ -695,7 +734,7 @@ public class CoverOverlayMirrorService extends Service {
         if (mRoot != null && sRunning) {
             showAgain();
             if (!mProjectionAlive) {
-                startProjection();
+                startProjectionAsync();
             }
             return START_STICKY;
         }
@@ -704,7 +743,7 @@ public class CoverOverlayMirrorService extends Service {
             stopSelf();
             return START_NOT_STICKY;
         }
-        startProjection();
+        startProjectionAsync();
         // 关屏时三星会把前台服务杀掉（实测服务数归 0）。用 STICKY 让系统拉回来，
         // 拉回来时没有授权数据 → 上面的分支会自动重新申请。
         return START_STICKY;
@@ -828,6 +867,39 @@ public class CoverOverlayMirrorService extends Service {
 
     /* ------------------------------------------------------------ 录屏 */
 
+    /** startProjection 是否已在跑（防并发重入）。 */
+    private final Object mProjLock = new Object();
+    private boolean mProjBusy = false;
+
+    /**
+     * 把 {@link #startProjection()} 挪出主线程（2026-11-13）。
+     *
+     * <p>原来它在 `onStartCommand` 里同步跑：里面有一段 `Shell.execSync`（Shizuku 往返，
+     * 约 1 秒）＋ `Thread.sleep(1200)` 等 `wm size` 生效 ⇒ **点"开始镜像"主线程被占约 2 秒**。
+     * 现在整段丢进工作线程，主线程立刻返回；重入用 {@code mProjBusy} 挡住
+     * （关屏恢复会再触发一次，两路并发会各建一套 VirtualDisplay，画面叠影）。
+     */
+    private void startProjectionAsync() {
+        synchronized (mProjLock) {
+            if (mProjBusy) {
+                Log.i(TAG, "projection start already in flight, skip");
+                return;
+            }
+            mProjBusy = true;
+        }
+        new Thread(() -> {
+            try {
+                startProjection();
+            } catch (Throwable t) {
+                Log.e(TAG, "startProjection crashed", t);
+            } finally {
+                synchronized (mProjLock) {
+                    mProjBusy = false;
+                }
+            }
+        }, "proj-start").start();
+    }
+
     private void startProjection() {
         // 🔴 重入保护：关屏恢复会再次调用本方法。旧的 VirtualDisplay / ImageReader
         //    不释放的话，两路帧会都往同一个 View 上画，画面叠影（实测状态栏出现两份）。
@@ -905,6 +977,16 @@ public class CoverOverlayMirrorService extends Service {
             int capW = Math.max(1, mSrcW);
             int capH = Math.max(1, mSrcH);
             mReader = ImageReader.newInstance(capW, capH, PixelFormat.RGBA_8888, 2);
+            // 尺寸可能变（几何守卫会重设 wm size），旧缓冲作废
+            mFrameBufA = null;
+            mFrameBufB = null;
+            mRowDst = null;
+            mRowBytes = null;
+            mFrameUseA = true;
+            mFramePending = false;
+            if (mMainHandler == null) {
+                mMainHandler = new Handler(getMainLooper());
+            }
 
             mThread = new HandlerThread("flip-overlay-capture");
             mThread.start();
@@ -917,7 +999,25 @@ public class CoverOverlayMirrorService extends Service {
                     if (img == null) {
                         return;
                     }
-                    Bitmap bmp = Bitmap.createBitmap(capW, capH, Bitmap.Config.ARGB_8888);
+                    // 🔴 丢帧优先：上一帧还没画出去就整帧丢掉（finally 里会 close）。
+                    //    这里必须**先 acquire 再判断** —— maxImages=2 时如果拿到新帧却不取走，
+                    //    生产端很快没有空闲 buffer，回调从此不再来（画面卡死）。
+                    if (mFramePending) {
+                        return;
+                    }
+                    // 🔴 双缓冲复用：原来每帧 createBitmap(1080x944) = 4.08MB、60fps 下 245MB/秒的分配，
+                    //    把 GC 逼到不停跑（发热/掉帧）。现在两张图交替用，「在画的那张」和「在写的那张」
+                    //    永远是不同的一张，配合上面的 pending 闸，不需要第三张。
+                    Bitmap bmp = mFrameUseA ? mFrameBufA : mFrameBufB;
+                    if (bmp == null) {
+                        bmp = Bitmap.createBitmap(capW, capH, Bitmap.Config.ARGB_8888);
+                        if (mFrameUseA) {
+                            mFrameBufA = bmp;
+                        } else {
+                            mFrameBufB = bmp;
+                        }
+                    }
+                    mFrameUseA = !mFrameUseA;
                     Image.Plane plane = img.getPlanes()[0];
                     ByteBuffer buf = plane.getBuffer();
                     buf.rewind();
@@ -931,8 +1031,13 @@ public class CoverOverlayMirrorService extends Service {
                     if (pixelStride == 4 && rowStride == rowBytes) {
                         bmp.copyPixelsFromBuffer(buf);
                     } else {
-                        byte[] dst = new byte[capW * capH * 4];
-                        byte[] row = new byte[rowBytes];
+                        // 复用同一块行缓冲，避免每帧再分配 4MB
+                        if (mRowDst == null || mRowDst.length != capW * capH * 4) {
+                            mRowDst = new byte[capW * capH * 4];
+                            mRowBytes = new byte[rowBytes];
+                        }
+                        byte[] dst = mRowDst;
+                        byte[] row = mRowBytes;
                         for (int y = 0; y < capH; y++) {
                             buf.position(y * rowStride);
                             buf.get(row, 0, rowBytes);
@@ -943,13 +1048,25 @@ public class CoverOverlayMirrorService extends Service {
                     final Bitmap out = bmp;
                     mFrameCount++;
                     if (mFrameCount == 1 || mFrameCount % 120 == 0) {
-                        Log.i(TAG, "frame in: n=" + mFrameCount + " " + capW + "x" + capH);
+                        Log.i(TAG, "frame in: n=" + mFrameCount + " " + capW + "x" + capH
+                                + " pending=" + mFramePending);
                     }
-                    new Handler(getMainLooper()).post(() -> {
-                        if (mView != null) {
-                            mView.setBitmap(out);
-                        }
-                    });
+                    // 🔴 单一 Handler ＋ pending 闸：不再每帧 new Handler()，也不再让队列无限堆积。
+                    //    主线程慢的时候这里只会"少画几帧"，不会攒一堆 4MB 的 Bitmap 把内存吃穿。
+                    mFramePending = true;
+                    try {
+                        mMainHandler.post(() -> {
+                            try {
+                                if (mView != null) {
+                                    mView.setBitmap(out);
+                                }
+                            } finally {
+                                mFramePending = false;
+                            }
+                        });
+                    } catch (Throwable t) {
+                        mFramePending = false;
+                    }
                 } catch (Throwable t) {
                     Log.w(TAG, "frame dropped: " + t.getMessage());
                 } finally {
@@ -1070,6 +1187,8 @@ public class CoverOverlayMirrorService extends Service {
     private void showAgain() {
         mHidden = false;
         sHidden = false;
+        // 退出时释放过唤醒锁（见 shutdown），回来要重新拿
+        acquireWakeLockIfNeeded();
         try {
             if (mRoot != null && mWm != null) {
                 applyFlipIfNeeded();
@@ -1098,6 +1217,11 @@ public class CoverOverlayMirrorService extends Service {
         sUserExited = false;          // 允许下次直接再显示
         try {
             MirrorState.setDesired(this, false);
+            // 🔴 退出就放掉唤醒锁（2026-11-13）。
+            //    原来退出只是隐藏窗口、不 stopSelf，于是 onDestroy 永远不跑，
+            //    PARTIAL_WAKE_LOCK 一直持着 —— 实测退出后仍持锁 22 分钟，纯待机耗电。
+            //    窗口与投影照旧保留（"秒回"不受影响），只是不再阻止 CPU 休眠。
+            releaseWakeLock();
             KeepAliveReceiver.cancel(this);
         } catch (Throwable ignored) { }
 

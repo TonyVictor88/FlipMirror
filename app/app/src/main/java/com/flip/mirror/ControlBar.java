@@ -592,7 +592,9 @@ public class ControlBar extends FrameLayout {
         @Override
         public void getHitRect(android.graphics.Rect outRect) {
             super.getHitRect(outRect);
-            int pad = Math.round(12 * getResources().getDisplayMetrics().density);
+            // 🔴 外扩量必须 < 按钮间距的一半，否则相邻按钮的命中区互相重叠，
+            //    点在缝里会命中"上一个"按钮（实测点关闭却退了返回）。间距见 mGap，默认 8dp。
+            int pad = Math.max(1, Math.round(3 * getResources().getDisplayMetrics().density));
             outRect.inset(-pad, -pad);
         }
 
@@ -649,17 +651,20 @@ public class ControlBar extends FrameLayout {
         private void buildPath() {
             mPath.reset();
             switch (mType) {
-                // 四个图标统一到 16x16 视觉盒（中心 12,12）。
-                // 旧代码分别是 6.5x14 / 14x14 / 9x9 / 10x5，大小肉眼可见不一致。
+                // 🔴 四个图标统一到 **16×16 视觉盒**（中心 12,12），并按光学重量做微调：
+                //    旧版是 6.5x14 / 14x14 / 9x9 / 10x5，肉眼可见不齐；
+                //    上一版虽然都收进 16 盒，但"圆环"仍显胖、"折线箭头"仍显瘦、"✕"略小。
+                //    规则：外接盒一律 16；**圆形缩 5%（d=15.2）**补偿圆的视觉膨胀；
+                //    折线箭头加宽到 9.6（原来只有 8.4）；✕ 撑满 16。
                 case ICON_BACK:
-                    // 左向折线：高 16
-                    mPath.moveTo(16.2f, 4f);
-                    mPath.lineTo(7.8f, 12f);
-                    mPath.lineTo(16.2f, 20f);
+                    // 左向折线：高 16（4→20），宽 9.6（7.2→16.8）
+                    mPath.moveTo(16.8f, 4f);
+                    mPath.lineTo(7.2f, 12f);
+                    mPath.lineTo(16.8f, 20f);
                     break;
                 case ICON_HOME:
-                    // 圆环：直径 16
-                    mPath.addCircle(12f, 12f, 8f, Path.Direction.CW);
+                    // 圆环：d=15.2（光学补偿后与 16 的方框读起来一样大）
+                    mPath.addCircle(12f, 12f, 7.6f, Path.Direction.CW);
                     break;
                 case ICON_RECENTS:
                     // 圆角方框：16x16
@@ -667,11 +672,11 @@ public class ControlBar extends FrameLayout {
                     mPath.addRoundRect(mRect, 4.5f, 4.5f, Path.Direction.CW);
                     break;
                 case ICON_COLLAPSE:
-                    // ✕ 退出：两条对角线，跨度 16x16（与其他三个图标同一视觉盒）
-                    mPath.moveTo(4.5f, 4.5f);
-                    mPath.lineTo(19.5f, 19.5f);
-                    mPath.moveTo(19.5f, 4.5f);
-                    mPath.lineTo(4.5f, 19.5f);
+                    // ✕：撑满 16x16（原来 4.5→19.5 只有 15）
+                    mPath.moveTo(4f, 4f);
+                    mPath.lineTo(20f, 20f);
+                    mPath.moveTo(20f, 4f);
+                    mPath.lineTo(4f, 20f);
                     break;
                 case ICON_DOT:
                 default:

@@ -367,6 +367,102 @@ public class CoverOverlayMirrorService extends Service {
     /** 外屏(display 1)上一次的 Display 状态，用于做 OFF→ON 的边沿检测。 */
     private int mLastCoverState = -1;
 
+    /** 本会话期望的内屏逻辑尺寸（来自设置），周期校验拿它当基准。 */
+    private int mExpectW = 0;
+    private int mExpectH = 0;
+    private int mExpectDpi = 0;
+    /** 看门狗节拍计数（每拍 3 秒），用来把"重活"降到每 30 秒一次。 */
+    private int mTick = 0;
+
+    /**
+     * 几何自检：内屏实际逻辑尺寸是否还是我们设的那个值。
+     *
+     * <p>为什么需要：实测会话启动时读到过 **865×833**（不是我们设的 1080×944）——
+     * 阿田那边会改 `wm size`，改完之后我们不重设的话，采集面、`mSrcW`、触控映射全错位，
+     * 表现就是"画面在但点不准"。这里每 30 秒比对一次，漂了就抢回来。
+     *
+     * <p>用 {@link android.view.Display#getRealMetrics} 而不是 `wm size` 输出：不用开 shell、
+     * 不会因为"顺手设一次"造成配置变更闪屏。
+     */
+    private void checkGeometryDrift() {
+        if (mExpectW <= 0 || mExpectH <= 0) {
+            return;
+        }
+        int w = -1, h = -1;
+        try {
+            android.hardware.display.DisplayManager dm =
+                    (android.hardware.display.DisplayManager) getSystemService(DISPLAY_SERVICE);
+            android.view.Display d0 = dm == null ? null : dm.getDisplay(android.view.Display.DEFAULT_DISPLAY);
+            if (d0 == null) {
+                return;
+            }
+            android.util.DisplayMetrics m = new android.util.DisplayMetrics();
+            d0.getRealMetrics(m);
+            w = m.widthPixels;
+            h = m.heightPixels;
+        } catch (Throwable t) {
+            return;
+        }
+        if (w == mExpectW && h == mExpectH) {
+            return;
+        }
+        Log.w(TAG, "geometry drift: actual " + w + "x" + h
+                + " != expect " + mExpectW + "x" + mExpectH + " -> re-apply");
+        final int rw = mExpectW, rh = mExpectH, rd = mExpectDpi;
+        new Thread(() -> {
+            boolean ok = Shell.execSync("wm size " + rw + "x" + rh + "; wm density " + rd);
+            Log.i(TAG, "geometry re-applied -> " + ok);
+            // 尺寸变了之后采集面也要跟着重建，否则还是一帧不来（见 PT-541）
+            if (ok && mProjectionAlive) {
+                mSrcW = rw;
+                mSrcH = rh;
+                if (MirrorCanvasView.sTouch != null) {
+                    MirrorCanvasView.sTouch.setGeometry(rw, rh, rw, rh);
+                }
+            }
+        }, "geo-fix").start();
+    }
+
+    /**
+     * 触控映射自检（只读，不注入、不会误点桌面）。
+     *
+     * <p>把"视图矩形 / 显示逻辑尺寸 / 旋转 / 采集尺寸"四者摆在一起算一遍四角映射，
+     * 任何一项不一致都会在日志里显形 —— 2026-11-12 那次"点不准"就是这里对不上
+     * （视图收到 view=433,470，而手其实点在 620,450）。
+     */
+    private void logTouchMapping(String why) {
+        try {
+            android.hardware.display.DisplayManager dm =
+                    (android.hardware.display.DisplayManager) getSystemService(DISPLAY_SERVICE);
+            android.view.Display d1 = dm == null ? null : dm.getDisplay(1);
+            android.view.Display d0 = dm == null ? null : dm.getDisplay(android.view.Display.DEFAULT_DISPLAY);
+            if (d1 == null || d0 == null) {
+                return;
+            }
+            android.graphics.Point sz1 = new android.graphics.Point();
+            d1.getRealSize(sz1);
+            android.util.DisplayMetrics m0 = new android.util.DisplayMetrics();
+            d0.getRealMetrics(m0);
+
+            int vw = mView == null ? 0 : mView.getWidth();
+            int vh = mView == null ? 0 : mView.getHeight();
+            int[] loc = new int[2];
+            if (mView != null) {
+                mView.getLocationOnScreen(loc);
+            }
+            boolean okView = (loc[0] == 0 && loc[1] == 0 && vw == sz1.x && vh == sz1.y);
+            Log.i(TAG, "touch-map(" + why + "): display1=" + sz1.x + "x" + sz1.y
+                    + " rot=" + d1.getRotation()
+                    + " view=" + vw + "x" + vh + "@" + loc[0] + "," + loc[1]
+                    + " inner=" + m0.widthPixels + "x" + m0.heightPixels
+                    + " src=" + mSrcW + "x" + mSrcH
+                    + " expect=" + mExpectW + "x" + mExpectH
+                    + (okView ? " [view-covers-display]" : " [⚠ view!=display: 映射必错]"));
+        } catch (Throwable t) {
+            Log.w(TAG, "touch-map log failed: " + t);
+        }
+    }
+
     /**
      * 亮屏自愈：**关屏会把双屏并发（device_state 4）撤掉**，而 WakeWatcher 的 SCREEN_ON
      * 在 manifest 里收不到、闹钟又被退出流程 cancel 掉了 ⇒ 亮屏后外屏全黑（2026-11-12 实测）。
@@ -428,6 +524,12 @@ public class CoverOverlayMirrorService extends Service {
                     // 🔴 亮屏自愈：关屏会把双屏并发撤掉，亮屏后没人补 ⇒ 外屏全黑（2026-11-12 实测）
                     try {
                         healDualScreenIfNeeded();
+                    } catch (Throwable ignored) { }
+                    // 几何漂移守卫：每 10 拍（30 秒）比对一次内屏逻辑尺寸，被改了就抢回来
+                    try {
+                        if (++mTick % 10 == 0) {
+                            checkGeometryDrift();
+                        }
                     } catch (Throwable ignored) { }
                 } catch (Throwable ignored) { }
                 mBarWatchdog.postDelayed(this, 3000);
@@ -726,6 +828,9 @@ public class CoverOverlayMirrorService extends Service {
                 // （实测 Display.getRealMetrics 会返回旧值 960x924，导致只抓到 480x462。）
                 mSrcW = iw;
                 mSrcH = ih;
+                mExpectW = iw;
+                mExpectH = ih;
+                mExpectDpi = idpi;
                 // 🔴 同步刷新注入层 geometry：它的 map() 会把坐标裁到 mDstW。
                 // showOverlay 里调 setGeometry 时 mSrcW 还是 Display 旧值(1282)，
                 // 画布却按 1600 发坐标 ⇒ x>1282 的 MOVE 被裁平、速度归零
@@ -825,6 +930,11 @@ public class CoverOverlayMirrorService extends Service {
                 Log.w(TAG, "capture looks like cover (" + capW + "x" + capH
                         + "), suggest exiting and re-entering");
             }
+            // 启动自检：等布局落定后把「视图/显示/旋转/采集」四个几何摆出来。
+            // 对不上的话看门狗的几何守卫会在 30 秒内把它拉回期望值。
+            try {
+                new Handler(getMainLooper()).postDelayed(() -> logTouchMapping("startup"), 1500);
+            } catch (Throwable ignored) { }
         } catch (Throwable t) {
             Log.e(TAG, "startProjection failed", t);
         }

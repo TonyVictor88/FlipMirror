@@ -1415,6 +1415,25 @@ public class CoverOverlayMirrorService extends Service {
             if (mDst.width() <= 0 || mDst.height() <= 0) {
                 return true;
             }
+            // 🔴 多指：整段直接转发给多指通道，**单指那条路一行不动**（避免回归）。
+            //    两指落下后系统会先给一个 POINTER_DOWN，之后所有 MOVE 都带 2 个点，
+            //    这段把它们原样(含 pointerId 与 actionIndex)送进内屏，缩放/双指滑才成立。
+            final int pc = e.getPointerCount();
+            if (pc >= 2) {
+                int[] ids = new int[pc];
+                float[] mxs = new float[pc];
+                float[] mys = new float[pc];
+                for (int i = 0; i < pc; i++) {
+                    ids[i] = e.getPointerId(i);
+                    mxs[i] = e.getX(i);
+                    mys[i] = e.getY(i);
+                }
+                if (sTouch != null) {
+                    sTouch.sendMulti(e.getActionMasked(), e.getActionIndex(),
+                            ids, mxs, mys, e.getEventTime());
+                }
+                return true;
+            }
             // 画面坐标 → 内屏坐标
             // 注意：手指滑出画面区**不能直接 return** —— 那样 ACTION_UP 会丢，
             // 内屏认为手指一直按着，之后所有点击/滑动都被并进同一次手势

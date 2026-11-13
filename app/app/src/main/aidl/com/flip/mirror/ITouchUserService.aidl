@@ -28,4 +28,19 @@ interface ITouchUserService {
 
     /** Inject a batch of points for dragging (fewer binder round trips). */
     void injectBatch(int action, in float[] xs, in float[] ys, long downTime, long eventTime, int displayId);
+
+    /**
+     * Inject a multi-pointer touch event (two-finger pinch / scroll).
+     *
+     * @param action      MotionEvent action MASKED (0=DOWN 1=UP 2=MOVE 5=POINTER_DOWN 6=POINTER_UP)
+     * @param ids         pointer ids (parallel arrays with xs/ys)
+     * @param xs          x in target display coordinates
+     * @param ys          y in target display coordinates
+     * @param actionIndex which pointer the POINTER_DOWN/UP refers to (ignored for other actions)
+     * @param downTime    gesture down time
+     * @param eventTime   event time
+     * @param displayId   target display (inner screen = 0)
+     */
+    void injectMulti(int action, in int[] ids, in float[] xs, in float[] ys,
+                     int actionIndex, long downTime, long eventTime, int displayId);
 }

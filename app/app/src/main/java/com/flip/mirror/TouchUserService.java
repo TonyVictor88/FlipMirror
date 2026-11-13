@@ -99,8 +99,63 @@ public class TouchUserService extends ITouchUserService.Stub {
         }
     }
 
-    /** 兜底：本进程是 shell uid，直接跑 input 命令。 */
-    private void fallbackCommand(int action, float x, float y, int displayId) {
+    /**
+     * 多指注入（双指缩放/双指滑动）。
+     *
+     * <p>单指那条 {@link #inject} 用 {@code MotionEvent.obtain(down,ev,action,x,y,meta)} 构造，
+     * 天生只能带一个点。多指必须走 PointerProperties/PointerCoords 那一版 obtain，
+     * 并且 POINTER_DOWN/POINTER_UP 要把「动的是第几个点」编进 action 高位，否则系统判不出。
+     */
+    @Override
+    public void injectMulti(int action, int[] ids, float[] xs, float[] ys,
+                            int actionIndex, long downTime, long eventTime, int displayId) {
+        if (!mReady || ids == null || xs == null || ys == null) {
+            return;
+        }
+        int n = Math.min(ids.length, Math.min(xs.length, ys.length));
+        if (n <= 0) {
+            return;
+        }
+        if (n == 1) {
+            // 单点直接走老通道，行为完全不变
+            inject(action, xs[0], ys[0], downTime, eventTime, displayId);
+            return;
+        }
+        try {
+            MotionEvent.PointerProperties[] props = new MotionEvent.PointerProperties[n];
+            MotionEvent.PointerCoords[] coords = new MotionEvent.PointerCoords[n];
+            for (int i = 0; i < n; i++) {
+                MotionEvent.PointerProperties pp = new MotionEvent.PointerProperties();
+                pp.id = ids[i];
+                pp.toolType = MotionEvent.TOOL_TYPE_FINGER;
+                props[i] = pp;
+                MotionEvent.PointerCoords pc = new MotionEvent.PointerCoords();
+                pc.x = xs[i];
+                pc.y = ys[i];
+                pc.pressure = 1f;
+                pc.size = 1f;
+                coords[i] = pc;
+            }
+            int act = action;
+            if (action == MotionEvent.ACTION_POINTER_DOWN || action == MotionEvent.ACTION_POINTER_UP) {
+                act = action | (actionIndex << MotionEvent.ACTION_POINTER_INDEX_SHIFT);
+            }
+            MotionEvent ev = MotionEvent.obtain(downTime, eventTime, act, n, props, coords,
+                    0, 0, 1f, 1f, 0, 0,
+                    android.view.InputDevice.SOURCE_TOUCHSCREEN, 0);
+            try {
+                Method m = MotionEvent.class.getDeclaredMethod("setDisplayId", int.class);
+                m.setAccessible(true);
+                m.invoke(ev, displayId);
+            } catch (Throwable ignored) { }
+            mInject.invoke(mInputManager, ev, 0);
+            ev.recycle();
+        } catch (Throwable t) {
+            Log.w(TAG, "injectMulti failed: " + t);
+        }
+    }
+
+    /** 兜底：本进程是 shell uid，直接跑 input 命令。 */    private void fallbackCommand(int action, float x, float y, int displayId) {
         String a;
         switch (action) {
             case MotionEvent.ACTION_DOWN: a = "DOWN"; break;

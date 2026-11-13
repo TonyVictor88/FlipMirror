@@ -27,6 +27,19 @@ public interface TouchInjector {
     /** 带真实触摸时间戳的重载：注入必须沿用原事件时间，否则系统算出的速度是假的。 */
     boolean send(float srcX, float srcY, int action, long eventTime);
 
+    /**
+     * 多指注入（双指缩放/滑动）。坐标同样是外屏坐标，内部逐个映射到内屏。
+     *
+     * @param action      ACTION_* 的 masked 值（含 POINTER_DOWN / POINTER_UP）
+     * @param actionIndex POINTER_DOWN/UP 指向第几个点
+     * @param ids         pointerId 数组（与 vxs/vys 等长）
+     * @return 是否走了多指通道（false = 只有单点或退化了）
+     */
+    default boolean sendMulti(int action, int actionIndex, int[] ids,
+                              float[] vxs, float[] vys, long eventTime) {
+        return false;   // 具体实现不支持时保持单指行为
+    }
+
     /** 释放资源（关闭 uinput 设备）。 */
     void release();
 

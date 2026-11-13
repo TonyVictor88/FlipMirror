@@ -265,8 +265,53 @@ public class TouchInjectorImpl implements TouchInjector {
         }
     }
 
-    /** 执行注入命令（优先 root，其次 Shizuku，见 {@link Shell}）。 */
-    private void run(String cmd) {
+    /**
+     * 多指发送：只有外屏收到 ≥2 个点时才会走到这里。
+     *
+     * <p>坐标逐个 {@link #map} 到内屏坐标系（与单指同一套换算，缩放/裁切口径一致），
+     * 然后交给 shell 进程里的 {@code injectMulti} 组多指 MotionEvent。
+     * 快通道不可用时退化成「只发主指」，保证至少能拖动，不会整段手势丢掉。
+     */
+    @Override
+    public boolean sendMulti(int action, int actionIndex, int[] ids,
+                             float[] vxs, float[] vys, long eventTime) {
+        if (ids == null || vxs == null || vys == null) {
+            return false;
+        }
+        int n = Math.min(ids.length, Math.min(vxs.length, vys.length));
+        if (n < 2) {
+            return false;
+        }
+        float[] xs = new float[n];
+        float[] ys = new float[n];
+        for (int i = 0; i < n; i++) {
+            float[] p = map(vxs[i], vys[i]);
+            xs[i] = p[0];
+            ys[i] = p[1];
+        }
+        long t = eventTime > 0 ? eventTime : android.os.SystemClock.uptimeMillis();
+        if (action == MotionEvent.ACTION_DOWN) {
+            mDownTime = t;
+            mDownTimeReal = t;
+        }
+        if (mSvc != null) {
+            try {
+                java.lang.reflect.Method m = mSvc.getClass().getMethod("injectMulti",
+                        int.class, int[].class, float[].class, float[].class,
+                        int.class, long.class, long.class, int.class);
+                m.invoke(mSvc, action, ids, xs, ys, actionIndex, mDownTime, t, 0);
+                return true;
+            } catch (Throwable e) {
+                Log.w(TAG, "svc injectMulti failed: " + e.getMessage());
+            }
+        }
+        // 退化：只发主指，至少保住拖动/点击
+        send(vxs[0], vys[0], action == MotionEvent.ACTION_POINTER_DOWN
+                ? MotionEvent.ACTION_DOWN : action, t);
+        return false;
+    }
+
+    /** 执行注入命令（优先 root，其次 Shizuku，见 {@link Shell}）。 */    private void run(String cmd) {
         Shell.exec(cmd);
         Log.i(TAG, "inject: " + cmd);
     }

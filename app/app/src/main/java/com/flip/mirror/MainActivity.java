@@ -73,6 +73,17 @@ public class MainActivity extends Activity {
     }
 
     private Button mSelfCheck, mGo, mSettings, mBackHome;
+    private Button mRepair;
+    /** 上次自检发现的问题位（只修这些；0 = 全绿）。**只有点「② 修复」才会动**。 */
+    private volatile int mFails = 0;
+
+    /* 问题位定义（一位一项，便于"只修失败项"） */
+    private static final int F_DUAL = 1;        // 双屏并发
+    private static final int F_SIZE = 1 << 1;   // 内屏尺寸
+    private static final int F_DENS = 1 << 2;   // 内屏密度
+    private static final int F_POCKET = 1 << 3; // 防误触
+    private static final int F_OP = 1 << 4;     // 投影 appop
+    private static final int F_GESTURE = 1 << 5;// 输入手势卡死
 
     private void autoPrepScreen() {
         new Thread(() -> {
@@ -254,10 +265,32 @@ public class MainActivity extends Activity {
         mSelfCheck = selfCheck;
         styleFlat(selfCheck, 0xFF26303A);
         selfCheck.setText("① 自检");
-        LinearLayout.LayoutParams selfCheckLp = new LinearLayout.LayoutParams(
+        selfCheck.setAllCaps(false);
+
+        Button repair = new Button(this);
+        mRepair = repair;
+        styleFlat(repair, 0xFF7A4A1E);
+        repair.setText("② 修复");
+        repair.setAllCaps(false);
+        repair.setEnabled(false);      // 没跑过自检之前不允许点，避免"盲修"
+        repair.setOnClickListener(v -> runRepair());
+
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, Math.round(54 * d));
-        selfCheckLp.setMargins(0, Math.round(7 * d), 0, Math.round(7 * d));
-        selfCheck.setLayoutParams(selfCheckLp);
+        rowLp.setMargins(0, Math.round(7 * d), 0, Math.round(7 * d));
+        row.setLayoutParams(rowLp);
+        LinearLayout.LayoutParams halfLp = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.MATCH_PARENT, 1f);
+        selfCheck.setLayoutParams(halfLp);
+        LinearLayout.LayoutParams halfLp2 = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.MATCH_PARENT, 1f);
+        halfLp2.leftMargin = Math.round(8 * d);
+        repair.setLayoutParams(halfLp2);
+        row.addView(selfCheck);
+        row.addView(repair);
+        root.addView(row);
         selfCheck.setOnClickListener(v -> runSelfCheck());
 
 
@@ -661,61 +694,192 @@ public class MainActivity extends Activity {
      */
     private void runSelfCheck() {
         if (mStatus != null) {
-            mStatus.setText("自检中…");
+            mStatus.setText("自检中…（只读，不改任何东西）");
         }
         new Thread(() -> {
             StringBuilder sb = new StringBuilder();
-            boolean allOk = true;
+            int fails = 0;
 
             // ① Shizuku
-            boolean binder = false;
+            boolean shizukuOk = false;
             int perm = -1;
             try {
-                binder = rikka.shizuku.Shizuku.pingBinder();
-                if (binder) {
+                shizukuOk = rikka.shizuku.Shizuku.pingBinder();
+                if (shizukuOk) {
                     perm = rikka.shizuku.Shizuku.checkSelfPermission();
                 }
             } catch (Throwable ignored) { }
-            boolean shizukuOk = binder && perm == 0;   // 0 = PERMISSION_GRANTED
-            allOk &= shizukuOk;
-            sb.append(shizukuOk ? "✅ Shizuku 已授权" : "❌ Shizuku 未就绪/未授权");
+            shizukuOk = shizukuOk && perm == 0;
+            sb.append(shizukuOk ? "✅ Shizuku 已授权"
+                    : "❌ Shizuku 未授权（只能人工重新授权）");
 
-            // ② 外屏存在
+            // ② 外屏
             boolean coverOk = false;
             try {
                 android.hardware.display.DisplayManager dm =
                         (android.hardware.display.DisplayManager) getSystemService(DISPLAY_SERVICE);
                 android.view.Display d1 = dm == null ? null : dm.getDisplay(1);
-                coverOk = d1 != null
-                        && d1.getState() != android.view.Display.STATE_OFF;
+                coverOk = d1 != null && d1.getState() != android.view.Display.STATE_OFF;
             } catch (Throwable ignored) { }
-            allOk &= coverOk;
-            sb.append("\n").append(coverOk ? "✅ 外屏在线" : "❌ 外屏未就绪");
+            sb.append("\n").append(coverOk ? "✅ 外屏在线" : "❌ 外屏未就绪（确认是展开状态）");
 
-            // ③ 双屏并发 + 内屏尺寸
-            boolean dualOk = false;
-            if (shizukuOk) {
-                // 自检必须**只读**：以前这里会 cmd device_state state 4 + wm size，
-                // 一改屏幕状态就触发配置变更、Activity 被重建，用户看到的是死掉的旧页面
-                // （反馈：点完自检按钮就都点不动了）。改成只读查询。
-                try {
-                    // execSync 只返回成败；能读到 wm size 就说明 Shizuku 通道可用
-                    dualOk = Shell.execSync("wm size");
-                } catch (Throwable ignored) { }
+            if (!shizukuOk) {
+                finishSelfCheck(sb, fails);
+                return;
             }
-            allOk &= dualOk;
-            sb.append("\n").append(dualOk ? "✅ 双屏已开启" : "❌ 双屏开启失败");
 
-            sb.append(allOk ? "\n\n自检通过，可以开始镜像。" : "\n\n有问题项，见上。");
-            final boolean ok = allOk;
-            final String msg = sb.toString();
-            Log.i(TAG, "self-check " + (ok ? "PASS" : "FAIL") + " | "
-                    + msg.replace("\n", " / "));
-            runOnUiThread(() -> {
-                if (mStatus != null) {
-                    mStatus.setText(msg);
-                }
-            });
+            // ③ 双屏并发（关屏会把它撤掉，掉了外屏就黑）
+            String st = Shell.execOut("cmd device_state state");
+            boolean dualOk = st != null && st.contains("CONCURRENT_INNER_DEFAULT");
+            if (!dualOk) {
+                fails |= F_DUAL;
+            }
+            sb.append("\n").append(dualOk ? "✅ 双屏并发已开" : "❌ 双屏并发掉了（外屏会黑）");
+
+            // ④ 内屏尺寸
+            String sz = Shell.execOut("wm size");
+            boolean sizeOk = sz != null && sz.contains("1080x944");
+            if (!sizeOk) {
+                fails |= F_SIZE;
+            }
+            sb.append("\n").append(sizeOk ? "✅ 内屏尺寸 1080x944"
+                    : "❌ 尺寸不对：" + oneLine(sz));
+
+            // ⑤ 内屏密度
+            String dn = Shell.execOut("wm density");
+            boolean densOk = dn != null && dn.contains("324");
+            if (!densOk) {
+                fails |= F_DENS;
+            }
+            sb.append("\n").append(densOk ? "✅ 内屏密度 324"
+                    : "❌ 密度不对：" + oneLine(dn));
+
+            // ⑥ 防误触（三星那层全屏页会吞掉全部触摸）
+            String pk = Shell.execOut("settings get system screen_off_pocket");
+            boolean pocketOk = pk != null && "0".equals(pk.trim());
+            if (!pocketOk) {
+                fails |= F_POCKET;
+            }
+            sb.append("\n").append(pocketOk ? "✅ 防误触已关"
+                    : "❌ 防误触还开着（会吞触摸）");
+
+            // ⑦ 投影 appop（免授权弹窗）
+            String op = Shell.execOut("appops get com.flip.mirror PROJECT_MEDIA");
+            boolean opOk = op != null && op.contains("allow");
+            if (!opOk) {
+                fails |= F_OP;
+            }
+            sb.append("\n").append(opOk ? "✅ 免授权弹窗已生效"
+                    : "❌ 投影授权项未开（每次启动会弹窗）");
+
+            // ⑧ 输入手势卡死（2026-11-13 那次"触摸全失效"的真因）
+            String inp = Shell.execOut("dumpsys input");
+            boolean gestureOk = inp != null && !hasStuckGesture(inp);
+            if (!gestureOk) {
+                fails |= F_GESTURE;
+            }
+            sb.append("\n").append(gestureOk ? "✅ 输入手势正常"
+                    : "❌ 输入手势卡死（触摸会全失效）");
+
+            finishSelfCheck(sb, fails);
         }, "self-check").start();
+    }
+
+    /** 自检收尾：写状态、记失败位、决定修复按钮能不能点。 */
+    private void finishSelfCheck(StringBuilder sb, int fails) {
+        mFails = fails;
+        if (fails == 0) {
+            sb.append("\n\n全部正常，可以开始镜像。");
+        } else {
+            sb.append("\n\n有 ").append(Integer.bitCount(fails))
+              .append(" 项异常 ⇒ 点「② 修复」（只修这几项）");
+        }
+        final String msg = sb.toString();
+        Log.i(TAG, "self-check " + (fails == 0 ? "PASS" : "FAIL(" + fails + ")") + " | "
+                + msg.replace("\n", " / "));
+        runOnUiThread(() -> {
+            if (mStatus != null) {
+                mStatus.setText(msg);
+            }
+            if (mRepair != null) {
+                mRepair.setEnabled(fails != 0);
+                mRepair.setText(fails != 0
+                        ? "② 修复（" + Integer.bitCount(fails) + " 项）" : "② 修复");
+            }
+        });
+    }
+
+    /**
+     * 判 `dumpsys input` 里有没有**卡住的按下指针**。
+     *
+     * <p>判据来自 2026-11-13 实测：`TouchStatesByDisplay` 段里出现
+     * `touchingPointers=[Pointer(id=N, FINGER)]` 就说明系统认为某根手指一直没抬起，
+     * 之后所有点击/滑动都会被并进那次僵死手势（表现为"画面在、点什么都不动"）。
+     * 注意空值是 `touchingPointers=[]`，所以不能只判 `touchingPointers` 这个串。
+     */
+    private static boolean hasStuckGesture(String dumpsysInput) {
+        if (dumpsysInput == null) {
+            return false;
+        }
+        int i = dumpsysInput.indexOf("TouchStatesByDisplay");
+        if (i < 0) {
+            return false;
+        }
+        int end = dumpsysInput.indexOf("CursorStatesByDisplay", i);
+        String seg = dumpsysInput.substring(i, end > i ? end : Math.min(dumpsysInput.length(), i + 4000));
+        return seg.contains("touchingPointers=[Pointer");
+    }
+
+    private static String oneLine(String s) {
+        if (s == null) {
+            return "读不到";
+        }
+        String t = s.replace("\r", " ").replace("\n", " ").trim();
+        return t.length() > 40 ? t.substring(0, 40) + "…" : t;
+    }
+
+    /**
+     * 手动修复：**只修自检标红的那几项**，而且**只能由用户点按钮触发**（V 2026-11-13 定：
+     * 不要自动修，必须自己手点）。修完自动重跑一次自检。
+     */
+    private void runRepair() {
+        final int fails = mFails;
+        if (fails == 0) {
+            if (mStatus != null) {
+                mStatus.setText("没有需要修复的项。");
+            }
+            return;
+        }
+        if (mStatus != null) {
+            mStatus.setText("修复中…（只修标红项）");
+        }
+        new Thread(() -> {
+            StringBuilder log = new StringBuilder();
+            if ((fails & F_DUAL) != 0) {
+                log.append(Shell.execSync("cmd device_state state 4")
+                        ? "✅ 双屏并发已重开\n" : "❌ 双屏并发仍失败\n");
+            }
+            if ((fails & F_SIZE) != 0 || (fails & F_DENS) != 0) {
+                boolean ok = Shell.execSync("wm size 1080x944; wm density 324");
+                log.append(ok ? "✅ 内屏尺寸/密度已重设\n" : "❌ 尺寸/密度重设失败\n");
+            }
+            if ((fails & F_POCKET) != 0) {
+                log.append(Shell.execSync("settings put system screen_off_pocket 0")
+                        ? "✅ 防误触已关\n" : "❌ 防误触关闭失败\n");
+            }
+            if ((fails & F_OP) != 0) {
+                log.append(Shell.execSync("appops set com.flip.mirror PROJECT_MEDIA allow")
+                        ? "✅ 免弹窗已恢复\n" : "❌ 授权项设置失败\n");
+            }
+            if ((fails & F_GESTURE) != 0) {
+                // 唯一能清掉`[Gesture Monitor]` 上僵死指针的办法（CANCEL/关屏/重置双屏都试过无效）。
+                // 副作用：最近任务列表清空；桌面会自己重开。
+                log.append(Shell.execSync("am force-stop com.sec.android.app.launcher")
+                        ? "✅ 已重启桌面，卡死手势清除（最近任务被清空）\n"
+                        : "❌ 桌面重启失败\n");
+            }
+            Log.i(TAG, "repair done: " + log.toString().replace("\n", " / "));
+            runSelfCheck();   // 修完自己再验一遍，结果直接盖到状态栏
+        }, "self-repair").start();
     }
 }

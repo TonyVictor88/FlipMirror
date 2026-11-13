@@ -103,9 +103,88 @@ public final class Shell {
         return false;
     }
 
-    /** 当前是否有可用通道（给 UI 提示用）。 */
-    public static boolean available() {
+    /**
+     * 执行命令并**读回标准输出**（自检要用：判据往往在输出文本里，
+     * 比如 `cmd device_state state` 有没有 CONCURRENT_INNER_DEFAULT、
+     * `dumpsys input` 里有没有卡住的 touchingPointers）。
+     *
+     * <p>读不到就返回 null —— 调用方必须把 null 当"未知"处理，别当"通过"。
+     * 内部自带 3 秒超时，避免 dumpsys 之类卡住把自检线程拖死。
+     */
+    public static String execOut(String cmd) {
+        // ① root
+        String[] suBins = {"su", "/system/bin/su", "/data/adb/ksu/bin/su"};
+        for (String bin : suBins) {
+            try {
+                Process p = Runtime.getRuntime().exec(new String[]{bin, "-c", cmd});
+                String out = readAll(p);
+                if (out != null) {
+                    return out;
+                }
+            } catch (Throwable ignored) { }
+        }
+        // ② Shizuku
         try {
+            if (!rikka.shizuku.Shizuku.pingBinder()) {
+                return null;
+            }
+            if (rikka.shizuku.Shizuku.checkSelfPermission() != 0) {
+                return null;
+            }
+            java.lang.reflect.Method m = rikka.shizuku.Shizuku.class.getDeclaredMethod(
+                    "newProcess", String[].class, String[].class, String.class);
+            m.setAccessible(true);
+            Object obj = m.invoke(null, new String[]{"/system/bin/sh", "-c", cmd}, null, null);
+            if (!(obj instanceof Process)) {
+                return null;
+            }
+            return readAll((Process) obj);
+        } catch (Throwable t) {
+            lastError = "execOut: " + t;
+            return null;
+        }
+    }
+
+    /** 读进程输出（上限 3 秒，防 dumpsys 卡死）。 */
+    private static String readAll(Process p) {
+        java.io.InputStream in = null;
+        try {
+            in = p.getInputStream();
+            java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[4096];
+            long deadline = android.os.SystemClock.elapsedRealtime() + 3000;
+            while (android.os.SystemClock.elapsedRealtime() < deadline) {
+                int avail = in.available();
+                if (avail > 0) {
+                    int n = in.read(buf, 0, Math.min(avail, buf.length));
+                    if (n > 0) {
+                        bos.write(buf, 0, n);
+                    }
+                } else {
+                    if (bos.size() > 0) {
+                        break;   // 已经读到内容且暂时没更多，收工
+                    }
+                    Thread.sleep(40);
+                }
+            }
+            String s = new String(bos.toByteArray(), "UTF-8");
+            return s.isEmpty() ? null : s;
+        } catch (Throwable t) {
+            return null;
+        } finally {
+            try {
+                if (in != null) {
+                    in.close();
+                }
+            } catch (Throwable ignored) { }
+            try {
+                p.destroy();
+            } catch (Throwable ignored) { }
+        }
+    }
+
+    /** 当前是否有可用通道（给 UI 提示用）。 */
+    public static boolean available() {        try {
             Process p = Runtime.getRuntime().exec(new String[]{"su", "-c", "id"});
             p.waitFor();
             return true;

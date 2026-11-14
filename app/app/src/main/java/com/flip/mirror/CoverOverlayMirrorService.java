@@ -350,6 +350,8 @@ public class CoverOverlayMirrorService extends Service {
                 @Override public void onExpand()   { }
             });
             mBar.useAsOverlay();
+            // 闲置自动隐藏：8 秒没人动控件条 ⇒ 整条淡出；点一下画面再淡回来（见 MirrorCanvasView）
+            mBar.enableIdleAutoHide(true);
 
             if (mRoot == null) {
                 Log.w(TAG, "root not ready, skip bar");
@@ -1208,6 +1210,12 @@ public class CoverOverlayMirrorService extends Service {
             MirrorState.setDesired(this, true);
             // 看门狗已按用户要求停用（不再自动恢复镜像）
         } catch (Throwable ignored) { }
+        // 重新显示镜像时控件条也一并显示，并把闲置计时重新起算
+        try {
+            if (mBar != null) {
+                mBar.wakeUp();
+            }
+        } catch (Throwable ignored) { }
         startBarWatchdogOnce();
     }
 
@@ -1347,6 +1355,13 @@ public class CoverOverlayMirrorService extends Service {
 
         /** 是否有一次触摸手势正在进行（保证 DOWN/UP 成对，防内屏指针卡住）。 */
         private boolean mGestureActive = false;
+        /**
+         * 本次手势只用于「唤醒控件条」，整段吃掉不注入内屏。
+         *
+         * <p>控件条闲置隐藏后，用户点画面的本意是"把控件叫回来"，不是点被镜像的 App；
+         * 若照常转发就会误触下面那个 App，所以从 DOWN 到 UP/CANCEL 全部丢弃。</p>
+         */
+        private boolean mSwallowGesture = false;
         private float mDownX = 0f, mDownY = 0f;
         private int mMoveCount = 0;
         private long mSwipeHintUntil = 0;
@@ -1541,6 +1556,27 @@ public class CoverOverlayMirrorService extends Service {
 
         @Override
         public boolean onTouchEvent(MotionEvent e) {
+            final int action = e.getActionMasked();
+
+            // 🔴 控件条闲置隐藏后：这一下点击只用来把控件条叫回来，**整段手势都不转发**。
+            //    不这么做的话，用户"想把控件叫回来"的那一下会点进被镜像的 App（误触）。
+            if (mSwallowGesture) {
+                if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                    mSwallowGesture = false;
+                }
+                return true;
+            }
+            if (mBar != null && mBar.isIdleHidden() && action == MotionEvent.ACTION_DOWN) {
+                mSwallowGesture = true;
+                mBar.wakeUp();
+                Log.i(TAG, "touch on hidden bar -> wake up (tap swallowed)");
+                return true;
+            }
+            // 控件条可见时：点击照常转发；只要有人在动屏幕，就把闲置计时推后
+            if (mBar != null && action == MotionEvent.ACTION_DOWN) {
+                mBar.resetIdleTimer();
+            }
+
             if (mBmp == null) {
                 return true;
             }

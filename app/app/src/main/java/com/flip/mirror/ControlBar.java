@@ -83,6 +83,11 @@ public class ControlBar extends FrameLayout {
     /** 控件条整体默认透明度（半透明，不抢内容）。 */
     private static final float BAR_ALPHA = 0.96f;
 
+    /** 闲置多久（毫秒）后整条自动隐藏。 */
+    public static final long IDLE_MS = 8000;
+    /** 自动隐藏的淡出 / 淡入时长（毫秒）。 */
+    private static final int FADE_MS = 250;
+
     /* ------------------------------------------------------------ 图标类型 */
 
     private static final int ICON_BACK = 0;
@@ -125,6 +130,23 @@ public class ControlBar extends FrameLayout {
 
     /** 尚未 attach 时暂存的宽度，attach 后补应用。 */
     private int mPendingW = -1;
+
+    /* ------------------------------------------------------------ 闲置隐藏 */
+
+    /** 是否启用闲置自动隐藏（只有悬浮层宿主会开）。 */
+    private boolean mIdleEnabled = false;
+    /** 是否已经因为闲置而整条隐藏。 */
+    private boolean mIdleHidden = false;
+    /** 正在淡出（用于「淡到一半被摸到」时回满 alpha）。 */
+    private boolean mFadingOut = false;
+    private android.os.Handler mIdleHandler;
+
+    private final Runnable mIdleFadeOut = new Runnable() {
+        @Override
+        public void run() {
+            fadeOutIdle();
+        }
+    };
 
     /* ------------------------------------------------------------ 构造入口 */
 
@@ -222,6 +244,104 @@ public class ControlBar extends FrameLayout {
     /** 设置整条透明度（0.3~1.0），用于「不遮挡内容」的轻量调节。 */
     public void setBarAlpha(float alpha) {
         setAlpha(Math.max(0.3f, Math.min(1f, alpha)));
+    }
+
+    /* ---------------------------------------------------------- 闲置隐藏 API */
+
+    /**
+     * 开启 / 关闭闲置自动隐藏。
+     *
+     * <p>开启后：{@link #IDLE_MS} 内没有任何控件条交互 ⇒ 整条（含小圆点）淡出并 GONE；
+     * 宿主在画面被点时调 {@link #wakeUp()} 让它淡回来。关闭时立刻恢复显示。</p>
+     *
+     * <p>默认关闭：只有「悬浮层」宿主才开 —— 内嵌在 Activity 里的老用法行为不变。</p>
+     */
+    public void enableIdleAutoHide(boolean enable) {
+        mIdleEnabled = enable;
+        if (enable) {
+            resetIdleTimer();
+            return;
+        }
+        idleHandler().removeCallbacks(mIdleFadeOut);
+        mFadingOut = false;
+        if (mIdleHidden) {
+            mIdleHidden = false;
+            animate().cancel();
+            setVisibility(VISIBLE);
+            setAlpha(BAR_ALPHA);
+        }
+    }
+
+    /** 控件条是否因为闲置而整条隐藏（宿主据此决定「这一下点击是否只用来唤醒」）。 */
+    public boolean isIdleHidden() {
+        return mIdleHidden;
+    }
+
+    /** 重置闲置计时。控件条上的任何一次按下（按钮 / 圆点）都会自动调用它。 */
+    public void resetIdleTimer() {
+        if (!mIdleEnabled || mIdleHidden) {
+            return;
+        }
+        // 淡出到一半又被摸了：立刻回满，别继续往 0 走
+        if (mFadingOut) {
+            mFadingOut = false;
+            animate().cancel();
+            setAlpha(BAR_ALPHA);
+        }
+        android.os.Handler h = idleHandler();
+        h.removeCallbacks(mIdleFadeOut);
+        h.postDelayed(mIdleFadeOut, IDLE_MS);
+    }
+
+    /** 点屏唤回：淡入到常态并把计时重置（已经显示时只重置计时）。 */
+    public void wakeUp() {
+        if (!mIdleHidden) {
+            resetIdleTimer();
+            return;
+        }
+        mIdleHidden = false;
+        mFadingOut = false;
+        idleHandler().removeCallbacks(mIdleFadeOut);
+        animate().cancel();
+        setVisibility(VISIBLE);
+        setAlpha(0f);
+        animate().alpha(BAR_ALPHA).setDuration(FADE_MS).start();
+        resetIdleTimer();
+    }
+
+    /** 到点了：整条淡出，动画结束后 GONE（GONE 之后触摸才会落到底下的镜像画面）。 */
+    private void fadeOutIdle() {
+        if (!mIdleEnabled || mIdleHidden) {
+            return;
+        }
+        mIdleHidden = true;
+        mFadingOut = true;
+        animate().cancel();
+        animate().alpha(0f).setDuration(FADE_MS).withEndAction(new Runnable() {
+            @Override
+            public void run() {
+                mFadingOut = false;
+                if (mIdleHidden) {
+                    setVisibility(GONE);
+                }
+            }
+        }).start();
+    }
+
+    private android.os.Handler idleHandler() {
+        if (mIdleHandler == null) {
+            mIdleHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+        }
+        return mIdleHandler;
+    }
+
+    /** 控件条上任何一次按下都算「有人在用」，把闲置计时推后。 */
+    @Override
+    public boolean dispatchTouchEvent(android.view.MotionEvent ev) {
+        if (ev.getActionMasked() == android.view.MotionEvent.ACTION_DOWN) {
+            resetIdleTimer();
+        }
+        return super.dispatchTouchEvent(ev);
     }
 
     /**
@@ -567,6 +687,9 @@ public class ControlBar extends FrameLayout {
         cancelAnim();
         if (mSpeedHandler != null) {
             mSpeedHandler.removeCallbacks(mSpeedTick);
+        }
+        if (mIdleHandler != null) {
+            mIdleHandler.removeCallbacks(mIdleFadeOut);
         }
         super.onDetachedFromWindow();
     }

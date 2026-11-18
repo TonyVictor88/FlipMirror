@@ -87,6 +87,7 @@ public class MainActivity extends Activity {
     private static final int F_POCKET = 1 << 3; // 防误触
     private static final int F_OP = 1 << 4;     // 投影 appop
     private static final int F_GESTURE = 1 << 5;// 输入手势卡死
+    private static final int F_SECURE = 1 << 6; // 屏幕上有受保护内容（secure 层）
 
     private void autoPrepScreen() {
         new Thread(() -> {
@@ -806,6 +807,24 @@ public class MainActivity extends Activity {
             sb.append("\n").append(gestureOk ? "✅ 输入手势正常"
                     : "❌ 输入手势卡死（触摸会全失效）");
 
+            // ⑨ 受保护内容（2026-11-18 实测）：SurfaceFlinger 里存在 (Secure) 层时，
+            //    镜像拿到的是黑帧 —— 这是系统防截屏，**不是本 App 的故障**，也无法自动修。
+            //    注意判据：窗口 fl= 里可能没有 FLAG_SECURE(0x2000)，必须查合成器。
+            String secOut = Shell.execOut("dumpsys SurfaceFlinger | grep -c '(Secure)'");
+            int secLayers = -1;
+            try {
+                secLayers = Integer.parseInt(secOut == null ? "" : secOut.trim());
+            } catch (Throwable ignored) { }
+            if (secLayers > 0) {
+                fails |= F_SECURE;
+                sb.append("\n❌ 受保护内容 ").append(secLayers)
+                  .append(" 层（该页镜像会全黑 · 系统防截屏，无法自动修）");
+            } else if (secLayers == 0) {
+                sb.append("\n✅ 无受保护内容");
+            } else {
+                sb.append("\nℹ️ 受保护内容：读不到（不影响使用）");
+            }
+
             finishSelfCheck(sb, fails);
         }, "self-check").start();
     }
@@ -904,6 +923,22 @@ public class MainActivity extends Activity {
             if ((fails & F_OP) != 0) {
                 log.append(Shell.execSync("appops set com.flip.mirror PROJECT_MEDIA allow")
                         ? "✅ 免弹窗已恢复\n" : "❌ 授权项设置失败\n");
+            }
+            if ((fails & F_SECURE) != 0) {
+                // 不能修：secure 层由系统合成器决定，第三方/Shizuku 都拿不到像素。
+                // 唯一出路是 root 后给虚拟屏加 VIRTUAL_DISPLAY_FLAG_SECURE（代价极大，未做）。
+                String names = Shell.execOut(
+                        "dumpsys SurfaceFlinger | grep '(Secure)' | head -3");
+                log.append("⚠️ 受保护内容无法自动修（系统防截屏）\n");
+                if (names != null) {
+                    for (String ln : names.split("\n")) {
+                        String t = ln.trim();
+                        if (!t.isEmpty()) {
+                            log.append("   · ").append(t).append("\n");
+                        }
+                    }
+                }
+                log.append("   出口：折叠展开，用内屏看这一页；或让我用 adb 直接改对应设置\n");
             }
             if ((fails & F_GESTURE) != 0) {
                 // 唯一能清掉`[Gesture Monitor]` 上僵死指针的办法（CANCEL/关屏/重置双屏都试过无效）。

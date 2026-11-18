@@ -993,6 +993,18 @@ public class MainActivity extends Activity {
                 sb.append("\nℹ️ 受保护内容：读不到（不影响使用）");
             }
 
+            // ⑩ 原生外屏态（信息项，**不计 fails**）：页面被搬到外屏时镜像本身是停的，
+            //    用户看到外屏没镜像属正常，别误判成镜像坏了。
+            String nativeComp = sCoverNativeComponent;
+            if (nativeComp != null) {
+                String shown = nativeComp.length() > 60
+                        ? nativeComp.substring(0, 60) + "…" : nativeComp;
+                sb.append("\n⚠️ 原生外屏态：").append(shown)
+                  .append("（镜像已停，页面直接跑在外屏）");
+            } else {
+                sb.append("\n✅ 镜像态（未搬到外屏）");
+            }
+
             finishSelfCheck(sb, fails);
         }, "self-check").start();
     }

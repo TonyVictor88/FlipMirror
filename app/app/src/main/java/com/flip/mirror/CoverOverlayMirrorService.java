@@ -1244,6 +1244,10 @@ public class CoverOverlayMirrorService extends Service {
      * 停掉后同一页亮度 217.9。搬回时由 onStartCommand 的 {@code !mProjectionAlive} 分支重起。</p>
      */
     private void stopProjectionInternal() {
+        // 🔴 2026-11-18 实测：停投影后若仍留着 sResultData，回滚/搬回会拿旧 token 去
+        //    createVirtualDisplay ⇒ RemoteException: MediaProjection.isValid 失败。
+        //    清掉它，重起时走「re-acquire via MainActivity」拿新授权。
+        try { sResultCode = 0; sResultData = null; } catch (Throwable ignored) { }
         try {
             if (mProjection != null) {
                 mProjection.stop();
@@ -1552,6 +1556,57 @@ public class CoverOverlayMirrorService extends Service {
      * 单屏下 display 1 不存在、页面无处可落。所以这里等它跑完再把双屏并发点回来，
      * 然后才 am start。</p>
      */
+    /** 轮询直到外屏可承载窗口（device_state=4 且已生效）。 */
+    private boolean waitCoverReady(int timeoutMs) {
+        long end = android.os.SystemClock.elapsedRealtime() + timeoutMs;
+        while (android.os.SystemClock.elapsedRealtime() < end) {
+            try {
+                Shell.execSync("cmd device_state state 4");
+                String st = Shell.execOut("cmd device_state state");
+                if (st != null && st.contains("CONCURRENT_INNER_DEFAULT")) {
+                    return true;
+                }
+                Thread.sleep(400);
+            } catch (Throwable ignored) { }
+        }
+        return false;
+    }
+
+    /**
+     * 校验目标包真的**稳定**停在外屏（topResumedActivity 的最后一行）。
+     *
+     * 🔴 两次命中间隔 1.2s 才算成功：实测有"闪一下就回首页"的情况（页面刚落 display 1，
+     *    系统又把 SubHome 拉回来），单次命中会误判成功、然后遮罩不再回来、用户看着首页发呆。
+     */
+    private boolean waitComponentOnCover(String comp, int timeoutMs) {
+        String pkg = comp != null && comp.contains("/")
+                ? comp.substring(0, comp.indexOf('/')) : comp;
+        if (pkg == null) {
+            return false;
+        }
+        long end = android.os.SystemClock.elapsedRealtime() + timeoutMs;
+        int hits = 0;
+        while (android.os.SystemClock.elapsedRealtime() < end) {
+            try {
+                String out = Shell.execOut(
+                        "dumpsys activity activities | grep topResumedActivity | tail -1");
+                if (out != null && out.contains(pkg + "/")) {
+                    hits++;
+                    if (hits >= 2) {
+                        return true;          // 连续两次（间隔约 1.2s）都在，才算稳
+                    }
+                    Thread.sleep(1200);
+                } else {
+                    hits = 0;
+                    Thread.sleep(300);
+                }
+            } catch (Throwable ignored) {
+                hits = 0;
+            }
+        }
+        return false;
+    }
+
     private void startMoveToCover() {
         final String comp = mPromptComponent;
         dismissPromptBar();
@@ -1561,7 +1616,7 @@ public class CoverOverlayMirrorService extends Service {
         }
         mMovingToCover = true;
         try {
-            shutdown();
+            shutdown(false);   // 只隐藏，不送首页（送首页会和 state 4 抢）
         } catch (Throwable t) {
             Log.w(TAG, "move to cover: shutdown failed: " + t);
         }
@@ -1574,17 +1629,26 @@ public class CoverOverlayMirrorService extends Service {
             Log.w(TAG, "move to cover: stop projection failed: " + t);
         }
         new Thread(() -> {
+            boolean ok = false;
             try {
-                // 给 shutdown() 里那条 "state 1 + 阿田首页" 的收尾线程留出时间（它内部 sleep 0.4s）；
-                // 实测要 1.8s 才不会和我们的 state 4 抢（抢输时 am start 会落空）
-                Thread.sleep(1800);
-            } catch (InterruptedException ignored) { }
-            boolean ok;
-            try {
-                // 🔴 2026-11-18 实测：state 4 之后外屏需要约 2 秒才 "app accessible"，
-                //    原来只 sleep 0.4 ⇒ am start 返回成功但页面落不下去（外屏仍是 SubHome，亮度 6.7）。
-                //    手动验证：state 4 → 等 2s → am start  ⇒ 亮度 240.7，页面正常。
-                ok = Shell.execSync("cmd device_state state 4; sleep 2; am start --display 1 -n " + comp);
+                // 不再固定 sleep：轮询到"外屏真的可承载窗口"再启动。
+                if (!waitCoverReady(6000)) {
+                    Log.w(TAG, "move to cover: cover not ready in 6s, try anyway");
+                }
+                // 实测：页面已在 display 0 前台时，`am start --display 1` 只会把原任务提到前面，
+                // 落不到外屏。先 force-stop 目标包，强制它是一次"新启动"。
+                String pkg = comp != null && comp.contains("/") ? comp.substring(0, comp.indexOf('/')) : comp;
+                Shell.execSync("am force-stop " + pkg + "; sleep 0.3");
+                ok = Shell.execSync("am start --display 1 -n " + comp)
+                        && waitComponentOnCover(comp, 4000);
+                if (!ok) {
+                    Log.w(TAG, "move to cover: first start failed, retry");
+                    Shell.execSync("cmd device_state state 4");
+                    Thread.sleep(400);
+                    Shell.execSync("am force-stop " + pkg + "; sleep 0.3");
+                    ok = Shell.execSync("am start --display 1 -n " + comp)
+                            && waitComponentOnCover(comp, 4000);
+                }
             } catch (Throwable t) {
                 Log.w(TAG, "move to cover: exec failed: " + t);
                 ok = false;
@@ -1699,7 +1763,14 @@ public class CoverOverlayMirrorService extends Service {
         }
     }
 
-    private void shutdown() {
+    private void shutdown() { shutdown(true); }
+
+    /**
+     * 搬去外屏用：只隐藏遮罩，**不**把外屏送回阿田首页。
+     * 原因（代码里原本就写着）：SubHome 只在 state 1 下存在；state 4 下外屏是空地。
+     * 而那条 hide-home 线程会 `state 1` 抢在我们的 `state 4` 之后 ⇒ 偶尔停在首页（V 实测）。
+     */
+    private void shutdown(boolean sendHome) {
         // 🔴 退出 = **隐藏**，不是拆除。
         // 拆除全屏悬浮层时，系统会把 SubHome 从绘制列表里摘掉；
         // 之后再请回来它是"resumed 但不绘制"，外屏永远停在壁纸（今天试了三种办法都不行）。
@@ -1730,7 +1801,7 @@ public class CoverOverlayMirrorService extends Service {
         // 隐藏后还要催一次 SubHome：它被全屏层盖住期间会停止绘制，
         // 只把层藏起来它不会自己重画（实测露出来还是壁纸）。发 HOME 让它恢复。
         try {
-            new Thread(() -> {
+            if (sendHome)             new Thread(() -> {
                 // 实测：只隐藏、只发 HOME 都恢复不了 SubHome（它被全屏层盖过后不再绘制）。
                 // 唯一验证过的组合是"退回单屏(state 1)让系统自己收掉外屏"，
                 // 用户按电源时由系统重新拉起 SubHome —— 早上就是这样工作的。

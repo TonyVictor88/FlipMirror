@@ -577,8 +577,9 @@ public class MainActivity extends Activity {
     /**
      * 把内屏当前前台页**原生**搬到 display 1。
      *
-     * <p>必须先停镜像：镜像是叠在 display 1 上的悬浮窗，不停掉会把原生窗口整个盖住
-     * （实测）。停完等 1.5s，让窗口管理器真正移除窗口，再 am start。</p>
+     * <p>必须先隐藏镜像（{@code shutdown()}，不是 stopService）：镜像是叠在 display 1 上的
+     * 悬浮窗，不隐藏会把原生窗口整个盖住，而且窗口还在吃触摸（实测点击被注入回内屏）。
+     * 隐藏后等 400ms 再 am start。</p>
      *
      * <p>shell 全部在后台线程，主线程只改按钮文字/状态/Toast。</p>
      */
@@ -613,14 +614,28 @@ public class MainActivity extends Activity {
                 return;
             }
             final String target = comp;
+            // 🔴 出口是「隐藏」，不是 stopService：服务是 START_STICKY，stopService 停不掉
+            //    （实测服务数仍为 1），遮罩继续吃触摸并把点击注入内屏。
+            //    shutdown() 会把窗口设成 alpha=0 + NOT_TOUCHABLE，点击才穿透到底下的原生页。
+            //    shutdown 必须跑在主线程，这里用 latch 把手势交回去再等它做完。
+            final boolean[] hid = new boolean[1];
+            final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
             try {
-                stopService(new Intent(MainActivity.this, CoverOverlayMirrorService.class));
-                Log.i(TAG, "move2cover: mirror stopped, wait 1500ms");
+                runOnUiThread(() -> {
+                    try {
+                        hid[0] = CoverOverlayMirrorService.hideNow();
+                    } finally {
+                        latch.countDown();
+                    }
+                });
+                latch.await(1500, java.util.concurrent.TimeUnit.MILLISECONDS);
             } catch (Throwable t) {
-                Log.w(TAG, "move2cover: stopService failed", t);
+                Log.w(TAG, "move2cover: hideNow failed", t);
             }
+            // ok == false ⇒ 服务本来就没跑，直接继续搬（不报错）
+            Log.i(TAG, "move2cover: hideNow -> " + hid[0] + ", wait 400ms");
             try {
-                Thread.sleep(1500);
+                Thread.sleep(400);
             } catch (InterruptedException ignored) { }
             boolean ok = false;
             try {
@@ -661,8 +676,17 @@ public class MainActivity extends Activity {
             }
             sCoverNativeComponent = null;
             finishMove("已搬回内屏，正在恢复镜像…", true);
-            // 与入口页「开始镜像」同一条路径（切双屏 → 申请授权 → 悬浮层服务）
-            runOnUiThread(MainActivity.this::startMirroring);
+            // 服务还活着（搬到外屏时只是隐藏）⇒ 走 onStartCommand 的 showAgain 分支，
+            // 复用同一个窗口"秒回"，不重新申请录屏；服务真没了才走申请授权那条路。
+            runOnUiThread(() -> {
+                if (CoverOverlayMirrorService.isRunning()) {
+                    Log.i(TAG, "move2inner: service alive, show overlay again");
+                    CoverOverlayMirrorService.start(MainActivity.this, 0, null);
+                } else {
+                    Log.i(TAG, "move2inner: service gone, request projection");
+                    startMirroring();
+                }
+            });
         }, "move-to-inner").start();
     }
 

@@ -141,6 +141,9 @@ public class CoverOverlayMirrorService extends Service {
      */
     private static volatile boolean sRunning = false;
 
+    /** 当前活着的服务实例：外部（MainActivity）要"隐藏镜像"时通过它走 shutdown()。 */
+    private static volatile CoverOverlayMirrorService sInst = null;
+
     /** 与实例的 mHidden 同步的一份静态标记，供入口页跨进程/跨实例判断。 */
     private static volatile boolean sHidden = false;
 
@@ -175,6 +178,30 @@ public class CoverOverlayMirrorService extends Service {
     }
 
     /**
+     * 外部请求「隐藏镜像」—— 与 ✕ 同一条路径（不是 stopService）。
+     *
+     * <p>本服务的"退出"是**隐藏**：窗口设成 alpha=0 + FLAG_NOT_TOUCHABLE，点击才会穿透到
+     * 下面的原生页面。stopService 对 START_STICKY 的服务无效（实测服务数与遮罩都还在）。
+     *
+     * <p>⚠️ 必须在主线程调用（shutdown 里要 updateViewLayout）。
+     *
+     * @return false = 服务本来就没跑（调用方直接继续，不算错误）
+     */
+    public static boolean hideNow() {
+        CoverOverlayMirrorService s = sInst;
+        if (s == null) {
+            return false;
+        }
+        try {
+            s.shutdown();
+            return true;
+        } catch (Throwable t) {
+            Log.w(TAG, "hideNow failed: " + t);
+            return false;
+        }
+    }
+
+    /**
      * 关屏保活用的唤醒锁。
      *
      * 抄的是阿田的做法（反编译它的 APK 看到 {@code Atian:ExternalDisplayWakeLock}）：
@@ -201,6 +228,7 @@ public class CoverOverlayMirrorService extends Service {
     public void onCreate() {
         super.onCreate();
         sRunning = true;
+        sInst = this;
         mStartAt = android.os.SystemClock.elapsedRealtime();
         // 落盘标记：告诉看门狗"用户期望正在投屏"。进程被杀也不丢。
         try {
@@ -1326,6 +1354,7 @@ public class CoverOverlayMirrorService extends Service {
         } catch (Throwable ignored) { }
         mProjectionAlive = false;
         sRunning = false;
+        sInst = null;
         sHidden = false;
         sResultCode = 0;
         sResultData = null;

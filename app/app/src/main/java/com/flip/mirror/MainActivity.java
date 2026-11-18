@@ -637,6 +637,11 @@ public class MainActivity extends Activity {
             try {
                 Thread.sleep(400);
             } catch (InterruptedException ignored) { }
+            // 🔴 隐藏之后还要停投影：MediaProjection 会话活着 ⇒ 系统判"屏幕共享中" ⇒
+            //    secure 页面自我遮挡并弹「为安全起见…」（实测亮度 16.6，停掉后 217.9）。
+            //    搬回时 onStartCommand 的 !mProjectionAlive 分支会重起投影。
+            boolean rel = CoverOverlayMirrorService.releaseProjectionNow();
+            Log.i(TAG, "move2cover: releaseProjectionNow -> " + rel);
             boolean ok = false;
             try {
                 ok = Shell.execSync("am start --display 1 -n " + target);

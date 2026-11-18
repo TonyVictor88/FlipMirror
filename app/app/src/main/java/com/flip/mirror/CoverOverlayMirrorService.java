@@ -201,6 +201,21 @@ public class CoverOverlayMirrorService extends Service {
         }
     }
 
+    /** 终止 MediaProjection（不动悬浮层）。搬去外屏前必须调用，否则系统判"屏幕共享中"。 */
+    public static boolean releaseProjectionNow() {
+        CoverOverlayMirrorService s = sInst;
+        if (s == null) {
+            return false;
+        }
+        try {
+            s.stopProjectionInternal();
+            return true;
+        } catch (Throwable t) {
+            Log.w(TAG, "releaseProjectionNow failed: " + t);
+            return false;
+        }
+    }
+
     /**
      * 关屏保活用的唤醒锁。
      *
@@ -1221,6 +1236,25 @@ public class CoverOverlayMirrorService extends Service {
         } catch (Throwable ignored) { }
     }
 
+    /**
+     * 真正停掉投影会话（释放 VirtualDisplay / ImageReader / 线程）。
+     *
+     * <p>搬去外屏前必须调用：只要 MediaProjection 会话活着，系统就认为"正在屏幕共享"，
+     * secure 页面会自我遮挡并弹「为安全起见…」提示（实测外屏亮度 16.6）；
+     * 停掉后同一页亮度 217.9。搬回时由 onStartCommand 的 {@code !mProjectionAlive} 分支重起。</p>
+     */
+    private void stopProjectionInternal() {
+        try {
+            if (mProjection != null) {
+                mProjection.stop();
+                mProjection = null;
+            }
+        } catch (Throwable ignored) { }
+        releaseProjection();          // 已有：释放 VirtualDisplay / ImageReader / 线程
+        mProjectionAlive = false;
+        Log.i(TAG, "projection stopped (move to cover)");
+    }
+
     /** 把已存在的悬浮层重新显示出来（退出后再进入走这条，不重建窗口）。 */
     private void showAgain() {
         mHidden = false;
@@ -1531,14 +1565,26 @@ public class CoverOverlayMirrorService extends Service {
         } catch (Throwable t) {
             Log.w(TAG, "move to cover: shutdown failed: " + t);
         }
+        // 🔴 隐藏之后必须停投影：只要 MediaProjection 会话还在，系统就判"屏幕共享中"，
+        //    secure 页面会自我遮挡（实测亮度 16.6）；停掉后同一页亮度 217.9。
+        //    搬回时由 onStartCommand 的 !mProjectionAlive 分支重起，不用在这里管。
+        try {
+            stopProjectionInternal();
+        } catch (Throwable t) {
+            Log.w(TAG, "move to cover: stop projection failed: " + t);
+        }
         new Thread(() -> {
             try {
-                // 给 shutdown() 里那条 "state 1 + 阿田首页" 的收尾线程留出时间（它内部 sleep 0.4s）
-                Thread.sleep(1200);
+                // 给 shutdown() 里那条 "state 1 + 阿田首页" 的收尾线程留出时间（它内部 sleep 0.4s）；
+                // 实测要 1.8s 才不会和我们的 state 4 抢（抢输时 am start 会落空）
+                Thread.sleep(1800);
             } catch (InterruptedException ignored) { }
             boolean ok;
             try {
-                ok = Shell.execSync("cmd device_state state 4; sleep 0.4; am start --display 1 -n " + comp);
+                // 🔴 2026-11-18 实测：state 4 之后外屏需要约 2 秒才 "app accessible"，
+                //    原来只 sleep 0.4 ⇒ am start 返回成功但页面落不下去（外屏仍是 SubHome，亮度 6.7）。
+                //    手动验证：state 4 → 等 2s → am start  ⇒ 亮度 240.7，页面正常。
+                ok = Shell.execSync("cmd device_state state 4; sleep 2; am start --display 1 -n " + comp);
             } catch (Throwable t) {
                 Log.w(TAG, "move to cover: exec failed: " + t);
                 ok = false;
@@ -1553,6 +1599,14 @@ public class CoverOverlayMirrorService extends Service {
                     showAgain();      // 回滚：把镜像放回来，别让用户停在黑屏
                 } catch (Throwable t) {
                     Log.w(TAG, "move to cover rollback failed: " + t);
+                }
+                // 投影已在搬之前停掉，回滚必须一起重起，否则遮罩是透明的空壳（全黑）
+                try {
+                    if (!mProjectionAlive) {
+                        startProjectionAsync();
+                    }
+                } catch (Throwable t) {
+                    Log.w(TAG, "move to cover rollback: restart projection failed: " + t);
                 }
                 try {
                     android.widget.Toast.makeText(getApplicationContext(),

@@ -24,8 +24,8 @@ android {
         applicationId "com.flip.mirror"
         minSdk 34
         targetSdk 34
-        versionCode 323
-        versionName "2.4.4"
+        versionCode 326
+        versionName "2.4.7"
     }
 
     signingConfigs {

@@ -245,6 +245,8 @@ public class CoverOverlayMirrorService extends Service {
         showOverlay();
         startBarWatchdogOnce();
         registerScreenOnRecovery();
+        // D 方案：受保护内容（secure 页必然全黑）自动感应 → 外屏弹「搬到外屏？」
+        startSecureWatch();
     }
 
     private void startForegroundWithNotification() {
@@ -1081,6 +1083,8 @@ public class CoverOverlayMirrorService extends Service {
                     }
                     final Bitmap out = bmp;
                     mFrameCount++;
+                    // D 方案：记下"帧还在来"，画面冻住时不能把最后一帧的黑当证据
+                    mLastFrameAt = android.os.SystemClock.elapsedRealtime();
                     if (mFrameCount == 1 || mFrameCount % 120 == 0) {
                         Log.i(TAG, "frame in: n=" + mFrameCount + " " + capW + "x" + capH
                                 + " pending=" + mFramePending);
@@ -1221,6 +1225,10 @@ public class CoverOverlayMirrorService extends Service {
     private void showAgain() {
         mHidden = false;
         sHidden = false;
+        // D 方案：回到镜像 = 不再"正在搬"，并重新起算黑帧计时（否则一回来就立刻判定全黑）
+        mMovingToCover = false;
+        mLastNonBlackAt = android.os.SystemClock.elapsedRealtime();
+        mLastSignalCheckAt = 0;
         // 退出时释放过唤醒锁（见 shutdown），回来要重新拿
         acquireWakeLockIfNeeded();
         try {
@@ -1245,6 +1253,396 @@ public class CoverOverlayMirrorService extends Service {
             }
         } catch (Throwable ignored) { }
         startBarWatchdogOnce();
+    }
+
+    /* ------------------------------------------- 受保护内容感应（D 方案） */
+
+    /**
+     * 黑帧阈值：任一采样点亮度（RGB 最大分量）超过它就算"有内容"。
+     * 16 是 spec 定的值，别自己调 —— 调高会把深色页当黑屏、调低会漏判。
+     */
+    private static final int BLACK_LEVEL = 16;
+    /** 每 10 帧扫一次（spec ①）。 */
+    private static final int BLACK_SAMPLE_EVERY = 10;
+    /** 采样步长（px）。 */
+    private static final int BLACK_SAMPLE_STEP = 16;
+    /** 多久没有亮点 ⇒ 疑似全黑（ms）。 */
+    private static final long BLACK_SUSPECT_MS = 6000;
+    /** 三信号复核节流（ms）。 */
+    private static final long SIGNAL_CHECK_GAP_MS = 3000;
+    /** 提示条 10 秒无操作自动消失。 */
+    private static final long PROMPT_AUTO_HIDE_MS = 10000;
+    /** 提示条消失后的冷却（ms），期间不再弹。 */
+    private static final long PROMPT_COOLDOWN_MS = 60000;
+    /** 「别烦我」：同一组件 30 分钟内不再弹。 */
+    private static final long MUTE_SAME_COMPONENT_MS = 30 * 60 * 1000L;
+    /** 提示条高度 / 左右留白（px，与控件条同口径：物理像素，不做 density 换算）。 */
+    private static final int PROMPT_HEIGHT = 56;
+    private static final int PROMPT_SIDE = 12;
+
+    /** 1 秒节拍（判黑 + 复核）。 */
+    private Handler mSecureWatch;
+    /** 最后一次采到亮点的时刻。 */
+    private volatile long mLastNonBlackAt = 0;
+    /** onDraw 帧计数（只在主线程读写）。 */
+    private int mDrawFrames = 0;
+    /** 最后一次收到采集帧的时刻：画面冻住时不能拿"黑"当证据。 */
+    private volatile long mLastFrameAt = 0;
+    /** 三信号复核节流时间戳。 */
+    private long mLastSignalCheckAt = 0;
+    /** 已经在"搬到外屏"流程里：整条链路期间不再感应。 */
+    private volatile boolean mMovingToCover = false;
+    /** 提示条当前是否显示着。 */
+    private volatile boolean mPromptShowing = false;
+    /** 提示条最后一次消失的时刻（冷却用）。 */
+    private long mPromptDismissedAt = 0;
+    /** 提示条对应的前台组件（点「搬过去」时要用）。 */
+    private String mPromptComponent = null;
+    private SecurePromptBar mPrompt;
+    /** 「别烦我」名单：component -> 解禁时刻（只主线程访问）。 */
+    private final java.util.HashMap<String, Long> mMutedComponents = new java.util.HashMap<>();
+    /** 采样复用的行缓冲（避免每次扫都分配 w 个 int）。 */
+    private int[] mSampleRow;
+    private int mSampleRowW;
+
+    /** 组件名形如 {@code com.android.settings/.SubSettings}。 */
+    private static final java.util.regex.Pattern COMPONENT_PATTERN =
+            java.util.regex.Pattern.compile(
+                    "([A-Za-z0-9_]+\\.)+[A-Za-z0-9_]+/[A-Za-z0-9_.$]+");
+
+    private void startSecureWatch() {
+        if (mSecureWatch != null) {
+            return;
+        }
+        mLastNonBlackAt = android.os.SystemClock.elapsedRealtime();
+        mSecureWatch = new Handler(getMainLooper());
+        mSecureWatch.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    tickSecureWatch();
+                } catch (Throwable t) {
+                    Log.w(TAG, "secure watch tick failed: " + t);
+                }
+                Handler h = mSecureWatch;
+                if (h != null) {
+                    h.postDelayed(this, 1000);
+                }
+            }
+        }, 1000);
+        Log.i(TAG, "secure-content watch started");
+    }
+
+    /**
+     * 1 秒节拍：先看"是不是持续全黑"，再跑三条信号复核。
+     * 复核很贵（三条 shell），所以只有疑似全黑才跑，且 3 秒一次。
+     */
+    private void tickSecureWatch() {
+        long now = android.os.SystemClock.elapsedRealtime();
+        // ⑤ 抑制条件
+        if (mPromptShowing || mMovingToCover) {
+            return;
+        }
+        if (mHidden || sHidden || mRoot == null || !mProjectionAlive) {
+            return;
+        }
+        if (mPromptDismissedAt > 0 && now - mPromptDismissedAt < PROMPT_COOLDOWN_MS) {
+            return;
+        }
+        // ① 还有亮帧 → 不是全黑
+        if (now - mLastNonBlackAt <= BLACK_SUSPECT_MS) {
+            return;
+        }
+        // 采集停了：**只有投影确实死了**才不能当受保护证据（关屏/被系统掐掉，画面冻在最后一帧）。
+        // 🔴 2026-11-18 实测修正：secure 页面本身就不出新帧（MediaProjection 对 secure 层不产帧），
+        //    原来这里无条件 return，导致"第一次弹过之后再也不弹"。改成"投影活着就继续"，
+        //    由下面三信号（device_state / (Secure) 层 / 前台组件）来决策，误判风险由那三条兜。
+        if (!mProjectionAlive) {
+            return;
+        }
+        if (now - mLastSignalCheckAt < SIGNAL_CHECK_GAP_MS) {
+            return;
+        }
+        mLastSignalCheckAt = now;
+        // ② 三信号复核必须在后台线程（dumpsys 很慢）
+        new Thread(this::checkProtectedContent, "secure-scan").start();
+    }
+
+    /**
+     * 三信号复核 —— 缺一不可（只按全黑判定会误弹，馆内 PT-555 / PT-642）：
+     * <ol>
+     *   <li>device_state 含 CONCURRENT_INNER_DEFAULT ⇒ 外屏真的亮着（排除关屏后外屏熄灭）</li>
+     *   <li>SurfaceFlinger 有 (Secure) 层 ⇒ 确实是防截屏（排除深色页面）</li>
+     *   <li>顶层 Activity 不是我们自己的页面</li>
+     * </ol>
+     * 三条都满足才回主线程弹提示条。
+     */
+    private void checkProtectedContent() {
+        try {
+            String ds = Shell.execOut("cmd device_state state");
+            if (ds == null || !ds.contains("CONCURRENT_INNER_DEFAULT")) {
+                Log.i(TAG, "secure-scan: no dual-screen concurrent, skip");
+                return;
+            }
+            String cnt = Shell.execOut("dumpsys SurfaceFlinger | grep -c '(Secure)'");
+            int secure = firstInt(cnt);
+            if (secure <= 0) {
+                Log.i(TAG, "secure-scan: no (Secure) layer (" + cnt + "), skip");
+                return;
+            }
+            String acts = Shell.execOut("dumpsys activity activities | grep topResumedActivity");
+            String top = firstNonEmptyLine(acts);
+            if (top == null) {
+                Log.i(TAG, "secure-scan: no topResumedActivity, skip");
+                return;
+            }
+            if (top.contains(getPackageName())) {
+                Log.i(TAG, "secure-scan: top is our own page, skip");
+                return;
+            }
+            String comp = componentOf(top);
+            if (comp == null) {
+                Log.i(TAG, "secure-scan: no component in [" + top + "], skip");
+                return;
+            }
+            Log.i(TAG, "secure-scan: hit, secure=" + secure + " comp=" + comp);
+            final String fcomp = comp;
+            new Handler(getMainLooper()).post(() -> maybeShowPrompt(fcomp));
+        } catch (Throwable t) {
+            Log.w(TAG, "checkProtectedContent failed: " + t);
+        }
+    }
+
+    /** 主线程：再复核一遍抑制条件后弹提示条。 */
+    private void maybeShowPrompt(String comp) {
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (mPromptShowing || mMovingToCover || mHidden || sHidden || mRoot == null) {
+            return;
+        }
+        if (mPromptDismissedAt > 0 && now - mPromptDismissedAt < PROMPT_COOLDOWN_MS) {
+            return;
+        }
+        Long muteUntil = mMutedComponents.get(comp);
+        if (muteUntil != null) {
+            if (now < muteUntil) {
+                Log.i(TAG, "prompt muted for " + comp + ", skip");
+                return;
+            }
+            mMutedComponents.remove(comp);
+        }
+        showPromptBar(comp);
+    }
+
+    private void showPromptBar(String comp) {
+        try {
+            mPromptComponent = comp;
+            mPrompt = new SecurePromptBar(mDcCtx != null ? mDcCtx : this,
+                    new SecurePromptBar.Listener() {
+                        @Override
+                        public void onMove() {
+                            startMoveToCover();
+                        }
+
+                        @Override
+                        public void onDismiss() {
+                            // 「别烦我」：记住当前 component，30 分钟内不再弹
+                            String c = mPromptComponent;
+                            if (c != null) {
+                                mMutedComponents.put(c,
+                                        android.os.SystemClock.elapsedRealtime()
+                                                + MUTE_SAME_COMPONENT_MS);
+                                Log.i(TAG, "prompt muted 30min: " + c);
+                            }
+                            dismissPromptBar();
+                        }
+                    });
+            android.widget.FrameLayout.LayoutParams lp =
+                    new android.widget.FrameLayout.LayoutParams(
+                            android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                            PROMPT_HEIGHT, Gravity.BOTTOM | Gravity.START);
+            // 🔴 2026-11-18 实测：原来贴在控件条下方（顶部），正好落在控件条闲置后的
+            //    「点一下唤醒」区里 —— 第一下点击被 mSwallowGesture 吞掉、按钮点不到。
+            //    挪到底部：离控件条远、拇指也够得着。
+            lp.bottomMargin = 24;
+            lp.leftMargin = PROMPT_SIDE;
+            lp.rightMargin = PROMPT_SIDE;
+            mRoot.addView(mPrompt, lp);
+            try {
+                mPrompt.bringToFront();
+            } catch (Throwable ignored) { }
+            mPromptShowing = true;
+            if (mSecureWatch != null) {
+                mSecureWatch.removeCallbacks(mPromptAutoHide);
+                mSecureWatch.postDelayed(mPromptAutoHide, PROMPT_AUTO_HIDE_MS);
+            }
+            Log.i(TAG, "secure prompt shown: " + comp);
+        } catch (Throwable t) {
+            Log.w(TAG, "showPromptBar failed: " + t);
+            mPromptShowing = false;
+        }
+    }
+
+    /** 10 秒无操作自动消失。 */
+    private final Runnable mPromptAutoHide = new Runnable() {
+        @Override
+        public void run() {
+            if (mPromptShowing) {
+                Log.i(TAG, "secure prompt auto-hide");
+                dismissPromptBar();
+            }
+        }
+    };
+
+    /** 摘掉提示条并记冷却时间（60 秒内不再弹）。 */
+    private void dismissPromptBar() {
+        mPromptShowing = false;
+        mPromptDismissedAt = android.os.SystemClock.elapsedRealtime();
+        try {
+            if (mSecureWatch != null) {
+                mSecureWatch.removeCallbacks(mPromptAutoHide);
+            }
+        } catch (Throwable ignored) { }
+        try {
+            if (mPrompt != null && mRoot != null) {
+                mRoot.removeView(mPrompt);
+            }
+        } catch (Throwable ignored) { }
+        mPrompt = null;
+    }
+
+    /**
+     * 「搬过去」：先 {@link #shutdown()}（与 ✕ 同一条隐藏路径），再让页面原生起在 display 1。
+     * 失败必须 {@link #showAgain()} 回滚 —— 不能把用户留在黑屏。
+     *
+     * <p>⚠️ shutdown() 自己的收尾线程会把外屏退回单屏（state 1）去恢复 SubHome，
+     * 单屏下 display 1 不存在、页面无处可落。所以这里等它跑完再把双屏并发点回来，
+     * 然后才 am start。</p>
+     */
+    private void startMoveToCover() {
+        final String comp = mPromptComponent;
+        dismissPromptBar();
+        if (comp == null) {
+            Log.w(TAG, "move to cover: no component, abort");
+            return;
+        }
+        mMovingToCover = true;
+        try {
+            shutdown();
+        } catch (Throwable t) {
+            Log.w(TAG, "move to cover: shutdown failed: " + t);
+        }
+        new Thread(() -> {
+            try {
+                // 给 shutdown() 里那条 "state 1 + 阿田首页" 的收尾线程留出时间（它内部 sleep 0.4s）
+                Thread.sleep(1200);
+            } catch (InterruptedException ignored) { }
+            boolean ok;
+            try {
+                ok = Shell.execSync("cmd device_state state 4; sleep 0.4; am start --display 1 -n " + comp);
+            } catch (Throwable t) {
+                Log.w(TAG, "move to cover: exec failed: " + t);
+                ok = false;
+            }
+            Log.i(TAG, "move to cover: " + comp + " -> " + ok);
+            if (ok) {
+                return;   // 成功：遮罩已退场，页面在外屏原生显示（触摸由系统自己处理）
+            }
+            new Handler(getMainLooper()).post(() -> {
+                mMovingToCover = false;
+                try {
+                    showAgain();      // 回滚：把镜像放回来，别让用户停在黑屏
+                } catch (Throwable t) {
+                    Log.w(TAG, "move to cover rollback failed: " + t);
+                }
+                try {
+                    android.widget.Toast.makeText(getApplicationContext(),
+                            "搬到外屏失败，已恢复镜像", android.widget.Toast.LENGTH_SHORT).show();
+                } catch (Throwable ignored) { }
+            });
+        }, "move-to-cover").start();
+    }
+
+    /** 取输出里的第一个整数（`grep -c` 的输出可能带换行/空格）。 */
+    private static int firstInt(String s) {
+        if (s == null) {
+            return -1;
+        }
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("\\d+").matcher(s);
+        if (!m.find()) {
+            return -1;
+        }
+        try {
+            return Integer.parseInt(m.group());
+        } catch (Throwable t) {
+            return -1;
+        }
+    }
+
+    /** 取第一行非空输出（spec：只看 topResumedActivity 的第一行）。 */
+    private static String firstNonEmptyLine(String s) {
+        if (s == null) {
+            return null;
+        }
+        for (String ln : s.split("\n")) {
+            String t = ln.trim();
+            if (!t.isEmpty()) {
+                return t;
+            }
+        }
+        return null;
+    }
+
+    /** 从 topResumedActivity 行里抠出 {@code pkg/Activity}。 */
+    private static String componentOf(String line) {
+        if (line == null) {
+            return null;
+        }
+        java.util.regex.Matcher m = COMPONENT_PATTERN.matcher(line);
+        return m.find() ? m.group() : null;
+    }
+
+    /**
+     * 按帧采黑：每 10 帧扫一次，步长 16px，算最大亮度。
+     * 任一采样点亮度 > {@link #BLACK_LEVEL} 就刷新 {@link #mLastNonBlackAt}。
+     *
+     * <p>用整行 getPixels（复用行缓冲）而不是逐点 getPixel：
+     * 1080 宽一行一次拷完，比 4000 次单点读取快一个量级。</p>
+     */
+    private void noteFrameBrightness(Bitmap b) {
+        if (b == null || b.isRecycled()) {
+            return;
+        }
+        if (++mDrawFrames % BLACK_SAMPLE_EVERY != 0) {
+            return;
+        }
+        final int w = b.getWidth();
+        final int h = b.getHeight();
+        if (w <= 0 || h <= 0) {
+            return;
+        }
+        if (mSampleRow == null || mSampleRowW < w) {
+            mSampleRow = new int[w];
+            mSampleRowW = w;
+        }
+        final int[] row = mSampleRow;
+        for (int y = 0; y < h; y += BLACK_SAMPLE_STEP) {
+            try {
+                b.getPixels(row, 0, w, 0, y, w, 1);
+            } catch (Throwable t) {
+                return;
+            }
+            for (int x = 0; x < w; x += BLACK_SAMPLE_STEP) {
+                int c = row[x];
+                int r = (c >> 16) & 0xFF;
+                int g = (c >> 8) & 0xFF;
+                int bl = c & 0xFF;
+                int v = r > g ? (r > bl ? r : bl) : (g > bl ? g : bl);
+                if (v > BLACK_LEVEL) {
+                    mLastNonBlackAt = android.os.SystemClock.elapsedRealtime();
+                    return;
+                }
+            }
+        }
     }
 
     private void shutdown() {
@@ -1343,6 +1741,17 @@ public class CoverOverlayMirrorService extends Service {
                 unregisterReceiver(mScreenOn);
             }
         } catch (Throwable ignored) { }
+        // D 方案：停掉感应节拍，摘掉提示条
+        try {
+            if (mSecureWatch != null) {
+                mSecureWatch.removeCallbacksAndMessages(null);
+                mSecureWatch = null;
+            }
+        } catch (Throwable ignored) { }
+        mPromptShowing = false;
+        mPrompt = null;
+        mPromptComponent = null;
+        mMovingToCover = false;
         try {
             if (mWakeLock != null && mWakeLock.isHeld()) {
                 mWakeLock.release();
@@ -1505,6 +1914,9 @@ public class CoverOverlayMirrorService extends Service {
             if (mBmp == null) {
                 return;
             }
+
+            // D 方案：顺手按帧采黑（每 10 帧一次、步长 16px），给受保护内容感应提供"画面全黑"证据
+            noteFrameBrightness(mBmp);
 
             // 内容铺满到边（不留内缩）：物理屏左/下/右下本来就带圆角，
             // 只有"右上角"在顶部黑带与画面交界处会露出直角，需要单独补。

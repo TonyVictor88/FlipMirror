@@ -44,6 +44,7 @@ public class MainActivity extends Activity {
     private static boolean sPermRequested = false;
 
     private MediaProjectionManager mPm;
+    private boolean mProjectionRequested = false;
     /** 本进程是否已把 PROJECT_MEDIA appop 打开（只需一次；杀进程后重设）。 */
     private static boolean sProjectionOpReady = false;
     private TextView mStatus;
@@ -147,27 +148,36 @@ public class MainActivity extends Activity {
         }, "shizuku-retry").start();
     }
 
-    /** 启动后 6 秒内若服务没起来，补一次申请（最多一次）。 */
+    /** 启动后轮询服务就绪，已存活时立刻收尾退出（避免自动重取授权时白占内屏 6 秒）。 */
     private void armStartupCheck(final int resultCode, final android.content.Intent data) {
-        getWindow().getDecorView().postDelayed(new Runnable() {
+        final android.view.View decor = getWindow().getDecorView();
+        final boolean[] retried = {false};
+        final long deadline = android.os.SystemClock.elapsedRealtime() + 6500L;
+        decor.postDelayed(new Runnable() {
             @Override
             public void run() {
-                if (CoverOverlayMirrorService.isRunning()) {
-                    Log.i(TAG, "startup check: service alive, finish");
+                if (isFinishing() || isDestroyed()) {
+                    return;
+                }
+                if (CoverOverlayMirrorService.isShowing()) {
+                    Log.i(TAG, "startup check: service showing, finish");
                     finish();
                     return;
                 }
-                Log.w(TAG, "startup check: not running, retry once");
-                CoverOverlayMirrorService.start(MainActivity.this, resultCode, data);
-                getWindow().getDecorView().postDelayed(new Runnable() {
-                    @Override
-                    public void run() {
-                        Log.i(TAG, "startup check done, finish");
-                        finish();
+                long left = deadline - android.os.SystemClock.elapsedRealtime();
+                if (left <= 0) {
+                    if (!retried[0] && !CoverOverlayMirrorService.isRunning()) {
+                        retried[0] = true;
+                        Log.w(TAG, "startup check: not running, retry once");
+                        CoverOverlayMirrorService.start(MainActivity.this, resultCode, data);
                     }
-                }, 3000);
+                    Log.i(TAG, "startup check done, finish");
+                    finish();
+                    return;
+                }
+                decor.postDelayed(this, 300L);
             }
-        }, 6000);
+        }, 300L);
     }
 
     /** 落盘标记：按下开始后需要"切屏→重建→再申请"接力。 */
@@ -429,8 +439,9 @@ public class MainActivity extends Activity {
 
         // 看门狗拉起时带 auto_start=true：不等人点按钮，直接把流程走完
         if (getIntent() != null && getIntent().getBooleanExtra("auto_start", false)) {
+            int delay = getIntent().getBooleanExtra("force_overlay", false) ? 150 : 900;
             new android.os.Handler(android.os.Looper.getMainLooper())
-                    .postDelayed(this::requestProjection, 900);
+                    .postDelayed(this::requestProjection, delay);
         }
 
         if (getDisplay() != null && getDisplay().getDisplayId() == 1) {
@@ -623,30 +634,42 @@ public class MainActivity extends Activity {
             try {
                 runOnUiThread(() -> {
                     try {
-                        hid[0] = CoverOverlayMirrorService.hideNow();
+                        hid[0] = CoverOverlayMirrorService.hideForNativeMove();
                     } finally {
                         latch.countDown();
                     }
                 });
                 latch.await(1500, java.util.concurrent.TimeUnit.MILLISECONDS);
             } catch (Throwable t) {
-                Log.w(TAG, "move2cover: hideNow failed", t);
+                Log.w(TAG, "move2cover: hideForNativeMove failed", t);
             }
             // ok == false ⇒ 服务本来就没跑，直接继续搬（不报错）
-            Log.i(TAG, "move2cover: hideNow -> " + hid[0] + ", wait 400ms");
-            try {
-                Thread.sleep(400);
-            } catch (InterruptedException ignored) { }
+            Log.i(TAG, "move2cover: hideForNativeMove -> " + hid[0]);
             // 🔴 隐藏之后还要停投影：MediaProjection 会话活着 ⇒ 系统判"屏幕共享中" ⇒
             //    secure 页面自我遮挡并弹「为安全起见…」（实测亮度 16.6，停掉后 217.9）。
             //    搬回时 onStartCommand 的 !mProjectionAlive 分支会重起投影。
             boolean rel = CoverOverlayMirrorService.releaseProjectionNow();
             Log.i(TAG, "move2cover: releaseProjectionNow -> " + rel);
-            boolean ok = false;
-            try {
-                ok = Shell.execSync("am start --display 1 -n " + target);
-            } catch (Throwable t) {
-                Log.w(TAG, "move2cover: am start failed", t);
+            // 确保双屏并发已就绪，再 force-stop 目标包后重新拉到 display 1
+            long readyEnd = android.os.SystemClock.elapsedRealtime() + 4000;
+            while (android.os.SystemClock.elapsedRealtime() < readyEnd) {
+                Shell.execSync("cmd device_state state 4");
+                String st = Shell.execOut("cmd device_state state");
+                if (st != null && st.contains("CONCURRENT_INNER_DEFAULT")) {
+                    break;
+                }
+                try { Thread.sleep(300); } catch (InterruptedException ignored) { break; }
+            }
+            String pkg = target.contains("/") ? target.substring(0, target.indexOf('/')) : target;
+            int tid = CoverOverlayMirrorService.findForegroundRootTask(0, pkg);
+            boolean ok = CoverOverlayMirrorService.moveStackToDisplay(tid, 1);
+            if (!ok) {
+                Shell.execSync("am force-stop " + pkg + "; sleep 0.3");
+                try {
+                    ok = Shell.execSync("am start --display 1 -n " + target);
+                } catch (Throwable t) {
+                    Log.w(TAG, "move2cover: am start failed", t);
+                }
             }
             if (ok) {
                 sCoverNativeComponent = target;
@@ -667,11 +690,15 @@ public class MainActivity extends Activity {
         setMoveLabel("正在搬回内屏…");
         setStatusText("正在搬回内屏…");
         new Thread(() -> {
-            boolean ok = false;
-            try {
-                ok = Shell.execSync("am start --display 0 -n " + comp);
-            } catch (Throwable t) {
-                Log.w(TAG, "move2inner: am start failed", t);
+            String pkg = comp.contains("/") ? comp.substring(0, comp.indexOf('/')) : comp;
+            int tid = CoverOverlayMirrorService.findForegroundRootTask(1, pkg);
+            boolean ok = CoverOverlayMirrorService.moveStackToDisplay(tid, 0);
+            if (!ok) {
+                try {
+                    ok = Shell.execSync("am start --display 0 -n " + comp);
+                } catch (Throwable t) {
+                    Log.w(TAG, "move2inner: am start failed", t);
+                }
             }
             if (!ok) {
                 // 搬不回来就别恢复镜像：原生页还占着 display 1，镜像叠上去只会打架
@@ -686,7 +713,7 @@ public class MainActivity extends Activity {
             runOnUiThread(() -> {
                 if (CoverOverlayMirrorService.isRunning()) {
                     Log.i(TAG, "move2inner: service alive, show overlay again");
-                    CoverOverlayMirrorService.start(MainActivity.this, 0, null);
+                    CoverOverlayMirrorService.resumeOverlay(MainActivity.this);
                 } else {
                     Log.i(TAG, "move2inner: service gone, request projection");
                     startMirroring();
@@ -743,6 +770,10 @@ public class MainActivity extends Activity {
     }
 
     private void requestProjection() {
+        if (mProjectionRequested || isFinishing() || isDestroyed()) {
+            return;
+        }
+        mProjectionRequested = true;
         // 先把双屏并发打开：外屏(state OFF)不亮的话，录屏授权对话框没有地方显示，
         // 流程会卡在 requestProjection 之后一动不动（实测：日志停在 on display 0，画面全黑）。
         // 顺序不能反：先申请录屏，再切双屏。
@@ -807,6 +838,7 @@ public class MainActivity extends Activity {
             }
             startActivityForResult(intent, REQ_PROJECTION);
         } catch (Exception e) {
+            mProjectionRequested = false;
             Log.e(TAG, "createScreenCaptureIntent failed", e);
             mStatus.setText("申请录屏授权失败：" + e.getMessage());
         }
@@ -819,6 +851,7 @@ public class MainActivity extends Activity {
             return;
         }
         if (resultCode != RESULT_OK || data == null) {
+            mProjectionRequested = false;
             mStatus.setText("用户拒绝了录屏授权");
             return;
         }

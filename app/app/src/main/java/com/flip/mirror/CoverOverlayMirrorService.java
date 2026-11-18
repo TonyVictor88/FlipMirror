@@ -146,6 +146,12 @@ public class CoverOverlayMirrorService extends Service {
 
     /** 与实例的 mHidden 同步的一份静态标记，供入口页跨进程/跨实例判断。 */
     private static volatile boolean sHidden = false;
+    /** 当前是否处于「外屏原生模式」（镜像暂停、应用直接跑在 display 1、外屏挂 CoverNativeBar）。 */
+    private static volatile boolean sNativeMode = false;
+
+    private CoverNativeBar mNativeBar;
+    private volatile int mMovedRootTaskId = -1;
+    private volatile String mMovedComponent = null;
 
     /**
      * 用户主动点了 ✕ 退出。
@@ -198,6 +204,32 @@ public class CoverOverlayMirrorService extends Service {
         } catch (Throwable t) {
             Log.w(TAG, "hideNow failed: " + t);
             return false;
+        }
+    }
+
+    /** 搬到外屏前隐藏镜像（不触发 state 1 送首页，避免与 state 4 抢）。 */
+    public static boolean hideForNativeMove() {
+        CoverOverlayMirrorService s = sInst;
+        if (s == null) {
+            return false;
+        }
+        try {
+            s.shutdown(false);
+            return true;
+        } catch (Throwable t) {
+            Log.w(TAG, "hideForNativeMove failed: " + t);
+            return false;
+        }
+    }
+
+    /** 从隐藏状态恢复悬浮层，不覆盖已有 sResultCode / sResultData。 */
+    public static void resumeOverlay(Context ctx) {
+        sUserExited = false;
+        Intent it = new Intent(ctx, CoverOverlayMirrorService.class);
+        if (Build.VERSION.SDK_INT >= 26) {
+            ctx.startForegroundService(it);
+        } else {
+            ctx.startService(it);
         }
     }
 
@@ -281,11 +313,15 @@ public class CoverOverlayMirrorService extends Service {
                 .setSmallIcon(android.R.drawable.ic_menu_view)
                 .setOngoing(true)
                 .build();
-        if (Build.VERSION.SDK_INT >= 34) {
-            startForeground(NOTI_ID, n,
-                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
-        } else {
-            startForeground(NOTI_ID, n);
+        try {
+            if (Build.VERSION.SDK_INT >= 34) {
+                startForeground(NOTI_ID, n,
+                        android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
+            } else {
+                startForeground(NOTI_ID, n);
+            }
+        } catch (SecurityException se) {
+            Log.w(TAG, "startForeground(mediaProjection) rejected (no active grant?): " + se);
         }
     }
 
@@ -1263,6 +1299,8 @@ public class CoverOverlayMirrorService extends Service {
     private void showAgain() {
         mHidden = false;
         sHidden = false;
+        sNativeMode = false;
+        hideNativeBar();
         // D 方案：回到镜像 = 不再"正在搬"，并重新起算黑帧计时（否则一回来就立刻判定全黑）
         mMovingToCover = false;
         mLastNonBlackAt = android.os.SystemClock.elapsedRealtime();
@@ -1572,8 +1610,48 @@ public class CoverOverlayMirrorService extends Service {
         return false;
     }
 
+    /** 读取外屏（Display #1）当前的 topResumedActivity 行；找不到 Display #1 段时回退最后一行。 */
+    private static String coverTopResumedLine() {
+        String out = Shell.execOut(
+                "dumpsys activity activities | grep -E 'Display #|topResumedActivity'");
+        if (out == null) {
+            return null;
+        }
+        boolean inCover = false;
+        String coverLine = null;
+        String lastAny = null;
+        for (String raw : out.split("\n")) {
+            String ln = raw.trim();
+            if (ln.startsWith("Display #")) {
+                inCover = ln.startsWith("Display #1 ") || ln.equals("Display #1");
+                continue;
+            }
+            if (ln.contains("topResumedActivity")) {
+                lastAny = ln;
+                if (inCover) {
+                    coverLine = ln;
+                }
+            }
+        }
+        return coverLine != null ? coverLine : lastAny;
+    }
+
+    /** 解析某包的主入口组件（当原内部子页未导出或带参依赖导致直拉失败时作回退）。 */
+    private String launcherComponentFor(String pkg) {
+        if (pkg == null) {
+            return null;
+        }
+        try {
+            Intent launch = getPackageManager().getLaunchIntentForPackage(pkg);
+            if (launch != null && launch.getComponent() != null) {
+                return launch.getComponent().flattenToShortString();
+            }
+        } catch (Throwable ignored) { }
+        return null;
+    }
+
     /**
-     * 校验目标包真的**稳定**停在外屏（topResumedActivity 的最后一行）。
+     * 校验目标包真的**稳定**停在外屏（Display #1 的 topResumedActivity）。
      *
      * 🔴 两次命中间隔 1.2s 才算成功：实测有"闪一下就回首页"的情况（页面刚落 display 1，
      *    系统又把 SubHome 拉回来），单次命中会误判成功、然后遮罩不再回来、用户看着首页发呆。
@@ -1588,8 +1666,7 @@ public class CoverOverlayMirrorService extends Service {
         int hits = 0;
         while (android.os.SystemClock.elapsedRealtime() < end) {
             try {
-                String out = Shell.execOut(
-                        "dumpsys activity activities | grep topResumedActivity | tail -1");
+                String out = coverTopResumedLine();
                 if (out != null && out.contains(pkg + "/")) {
                     hits++;
                     if (hits >= 2) {
@@ -1607,6 +1684,148 @@ public class CoverOverlayMirrorService extends Service {
         return false;
     }
 
+    /** 解析指定屏幕上的前台 RootTask id（用于无损 move-stack，不杀进程）。 */
+    public static int findForegroundRootTask(int displayId, String preferPkg) {
+        String out = Shell.execOut("cmd activity stack list");
+        if (out == null) {
+            return -1;
+        }
+        int curRoot = -1;
+        int curDisplay = -1;
+        int fallbackRoot = -1;
+        java.util.regex.Pattern rootPat = java.util.regex.Pattern.compile(
+                "RootTask id=(\\d+).*displayId=(\\d+)");
+        for (String raw : out.split("\n")) {
+            String ln = raw.trim();
+            java.util.regex.Matcher rm = rootPat.matcher(ln);
+            if (rm.find()) {
+                curRoot = Integer.parseInt(rm.group(1));
+                curDisplay = Integer.parseInt(rm.group(2));
+                continue;
+            }
+            if (curDisplay != displayId || curRoot <= 0) {
+                continue;
+            }
+            if (!ln.startsWith("taskId=")) {
+                continue;
+            }
+            if (preferPkg != null && ln.contains(" " + preferPkg + "/")) {
+                return curRoot;
+            }
+            if (ln.contains("visible=true")
+                    && !ln.contains("com.flip.mirror/")
+                    && !ln.contains("com.sec.android.app.launcher/")
+                    && !ln.contains("subscreen.SubHomeActivity")
+                    && fallbackRoot < 0) {
+                fallbackRoot = curRoot;
+            }
+        }
+        return fallbackRoot;
+    }
+
+    /** 用 cmd activity display move-stack 无损跨屏迁移 RootTask（保留完整页面栈与进程状态）。 */
+    public static boolean moveStackToDisplay(int rootTaskId, int displayId) {
+        if (rootTaskId <= 0) {
+            return false;
+        }
+        return Shell.execSync("cmd activity display move-stack " + rootTaskId + " " + displayId);
+    }
+
+    private void showNativeBar() {
+        try {
+            if (mWm == null || mDcCtx == null) {
+                return;
+            }
+            if (mNativeBar == null) {
+                mNativeBar = new CoverNativeBar(mDcCtx, mWm, new CoverNativeBar.Listener() {
+                    @Override
+                    public void onReturnToMirror() {
+                        returnFromNativeToMirror();
+                    }
+
+                    @Override
+                    public void onExit() {
+                        exitNativeToHome();
+                    }
+                });
+            }
+            mNativeBar.show();
+            Log.i(TAG, "native cover bar shown on display 1");
+        } catch (Throwable t) {
+            Log.w(TAG, "showNativeBar failed: " + t);
+        }
+    }
+
+    private void hideNativeBar() {
+        try {
+            if (mNativeBar != null) {
+                mNativeBar.hide();
+            }
+        } catch (Throwable ignored) { }
+    }
+
+    /** 原生模式 → 无损搬回 display 0 并恢复镜像。 */
+    private void returnFromNativeToMirror() {
+        if (mMovingToCover) {
+            return;
+        }
+        mMovingToCover = true;
+        hideNativeBar();
+        sNativeMode = false;
+        final int taskId = mMovedRootTaskId;
+        final String comp = mMovedComponent;
+        mMovedRootTaskId = -1;
+        mMovedComponent = null;
+        new Thread(() -> {
+            try {
+                int tid = taskId > 0 ? taskId : findForegroundRootTask(1, null);
+                boolean moved = moveStackToDisplay(tid, 0);
+                if (!moved && comp != null) {
+                    Shell.execSync("am start --display 0 -n " + comp);
+                }
+                Log.i(TAG, "return to mirror: moveStack(" + tid + "->0)=" + moved);
+            } catch (Throwable t) {
+                Log.w(TAG, "returnFromNativeToMirror move failed: " + t);
+            }
+            new Handler(getMainLooper()).post(() -> {
+                mMovingToCover = false;
+                try {
+                    if (mView != null) {
+                        mView.clearBitmap();
+                    }
+                    showAgain();
+                } catch (Throwable t) {
+                    Log.w(TAG, "returnFromNativeToMirror showAgain failed: " + t);
+                }
+                try {
+                    if (!mProjectionAlive) {
+                        startProjectionAsync();
+                    }
+                } catch (Throwable t) {
+                    Log.w(TAG, "returnFromNativeToMirror startProjection failed: " + t);
+                }
+            });
+        }, "return-to-mirror").start();
+    }
+
+    /** 原生模式直接退出回外屏首页：先把任务归还内屏，再切回 state 1。 */
+    private void exitNativeToHome() {
+        hideNativeBar();
+        sNativeMode = false;
+        final int taskId = mMovedRootTaskId;
+        mMovedRootTaskId = -1;
+        mMovedComponent = null;
+        new Thread(() -> {
+            try {
+                int tid = taskId > 0 ? taskId : findForegroundRootTask(1, null);
+                if (tid > 0) {
+                    moveStackToDisplay(tid, 0);
+                }
+            } catch (Throwable ignored) { }
+            new Handler(getMainLooper()).post(() -> shutdown(true));
+        }, "exit-native").start();
+    }
+
     private void startMoveToCover() {
         final String comp = mPromptComponent;
         dismissPromptBar();
@@ -1615,6 +1834,8 @@ public class CoverOverlayMirrorService extends Service {
             return;
         }
         mMovingToCover = true;
+        final String pkg = comp.contains("/") ? comp.substring(0, comp.indexOf('/')) : comp;
+        final int preTaskId = findForegroundRootTask(0, pkg);
         try {
             shutdown(false);   // 只隐藏，不送首页（送首页会和 state 4 抢）
         } catch (Throwable t) {
@@ -1630,32 +1851,63 @@ public class CoverOverlayMirrorService extends Service {
         }
         new Thread(() -> {
             boolean ok = false;
+            int movedId = -1;
             try {
                 // 不再固定 sleep：轮询到"外屏真的可承载窗口"再启动。
                 if (!waitCoverReady(6000)) {
                     Log.w(TAG, "move to cover: cover not ready in 6s, try anyway");
                 }
-                // 实测：页面已在 display 0 前台时，`am start --display 1` 只会把原任务提到前面，
-                // 落不到外屏。先 force-stop 目标包，强制它是一次"新启动"。
-                String pkg = comp != null && comp.contains("/") ? comp.substring(0, comp.indexOf('/')) : comp;
-                Shell.execSync("am force-stop " + pkg + "; sleep 0.3");
-                ok = Shell.execSync("am start --display 1 -n " + comp)
-                        && waitComponentOnCover(comp, 4000);
+                // ① 优先无损迁移 RootTask（不杀进程、保留子页与输入上下文）
+                int tid = preTaskId > 0 ? preTaskId : findForegroundRootTask(0, pkg);
+                if (tid > 0 && moveStackToDisplay(tid, 1)) {
+                    ok = waitComponentOnCover(comp, 4000);
+                    if (ok) {
+                        movedId = tid;
+                        Log.i(TAG, "move to cover: lossless move-stack(" + tid + ") ok");
+                    }
+                }
+                // ② 无损迁移未命中时退回 force-stop + am start --display 1
+                if (!ok) {
+                    Log.w(TAG, "move to cover: fallback to force-stop + am start");
+                    Shell.execSync("am force-stop " + pkg + "; sleep 0.3");
+                    ok = Shell.execSync("am start --display 1 -n " + comp)
+                            && waitComponentOnCover(comp, 7000);
+                }
                 if (!ok) {
                     Log.w(TAG, "move to cover: first start failed, retry");
                     Shell.execSync("cmd device_state state 4");
-                    Thread.sleep(400);
+                    Thread.sleep(500);
                     Shell.execSync("am force-stop " + pkg + "; sleep 0.3");
-                    ok = Shell.execSync("am start --display 1 -n " + comp)
-                            && waitComponentOnCover(comp, 4000);
+                    String retryComp = comp;
+                    boolean started = Shell.execSync("am start --display 1 -n " + retryComp);
+                    if (!started) {
+                        String launcher = launcherComponentFor(pkg);
+                        if (launcher != null && !launcher.equals(comp)) {
+                            Log.i(TAG, "move to cover: fallback to launcher " + launcher);
+                            retryComp = launcher;
+                            started = Shell.execSync("am start --display 1 -n " + retryComp);
+                        }
+                    }
+                    ok = started && waitComponentOnCover(retryComp, 7000);
+                }
+                if (ok && movedId <= 0) {
+                    movedId = findForegroundRootTask(1, pkg);
                 }
             } catch (Throwable t) {
                 Log.w(TAG, "move to cover: exec failed: " + t);
                 ok = false;
             }
-            Log.i(TAG, "move to cover: " + comp + " -> " + ok);
+            Log.i(TAG, "move to cover: " + comp + " -> " + ok + " (task=" + movedId + ")");
             if (ok) {
-                return;   // 成功：遮罩已退场，页面在外屏原生显示（触摸由系统自己处理）
+                final int finalId = movedId;
+                new Handler(getMainLooper()).post(() -> {
+                    mMovingToCover = false;
+                    mMovedRootTaskId = finalId;
+                    mMovedComponent = comp;
+                    sNativeMode = true;
+                    showNativeBar();
+                });
+                return;
             }
             new Handler(getMainLooper()).post(() -> {
                 mMovingToCover = false;
@@ -1866,6 +2118,15 @@ public class CoverOverlayMirrorService extends Service {
                 unregisterReceiver(mScreenOn);
             }
         } catch (Throwable ignored) { }
+        mShuttingDown = true;
+        sNativeMode = false;
+        hideNativeBar();
+        try {
+            if (mBarWatchdog != null) {
+                mBarWatchdog.removeCallbacksAndMessages(null);
+                mBarWatchdog = null;
+            }
+        } catch (Throwable ignored) { }
         // D 方案：停掉感应节拍，摘掉提示条
         try {
             if (mSecureWatch != null) {
@@ -2005,6 +2266,11 @@ public class CoverOverlayMirrorService extends Service {
             postInvalidate();
         }
 
+        void clearBitmap() {
+            mBmp = null;
+            postInvalidate();
+        }
+
         void setBitmap(Bitmap b) {
             // 只有"未隐藏"时才自动显形。否则每帧都会把 alpha 拉回 1，
             // 把 shutdown() 的隐藏覆盖掉（实测：日志说 hidden，画面照旧）。
@@ -2120,6 +2386,20 @@ public class CoverOverlayMirrorService extends Service {
 
         private final Rect mSrcRect = new Rect();
 
+        /** 将外屏 View 坐标映射到内屏逻辑坐标（含 mDst 偏移、180° 翻转镜像与边界裁剪）。 */
+        private void mapViewToInner(float rawX, float rawY, float[] out) {
+            float vx = rawX - mDst.left;
+            float vy = rawY - mDst.top;
+            if (mFlipTouch) {
+                vx = mDst.width() - vx;
+                vy = mDst.height() - vy;
+            }
+            vx = Math.max(0f, Math.min(vx, mDst.width()));
+            vy = Math.max(0f, Math.min(vy, mDst.height()));
+            out[0] = vx * mSrcW / (float) mDst.width();
+            out[1] = vy * mSrcH / (float) mDst.height();
+        }
+
         @Override
         public boolean onTouchEvent(MotionEvent e) {
             final int action = e.getActionMasked();
@@ -2153,16 +2433,18 @@ public class CoverOverlayMirrorService extends Service {
             }
             // 🔴 多指：整段直接转发给多指通道，**单指那条路一行不动**（避免回归）。
             //    两指落下后系统会先给一个 POINTER_DOWN，之后所有 MOVE 都带 2 个点，
-            //    这段把它们原样(含 pointerId 与 actionIndex)送进内屏，缩放/双指滑才成立。
+            //    同样需要扣除 mDst 偏移、处理 180° 翻转并缩放到内屏坐标。
             final int pc = e.getPointerCount();
             if (pc >= 2) {
                 int[] ids = new int[pc];
                 float[] mxs = new float[pc];
                 float[] mys = new float[pc];
+                float[] tmp = new float[2];
                 for (int i = 0; i < pc; i++) {
                     ids[i] = e.getPointerId(i);
-                    mxs[i] = e.getX(i);
-                    mys[i] = e.getY(i);
+                    mapViewToInner(e.getX(i), e.getY(i), tmp);
+                    mxs[i] = tmp[0];
+                    mys[i] = tmp[1];
                 }
                 if (sTouch != null) {
                     sTouch.sendMulti(e.getActionMasked(), e.getActionIndex(),
@@ -2174,19 +2456,10 @@ public class CoverOverlayMirrorService extends Service {
             // 注意：手指滑出画面区**不能直接 return** —— 那样 ACTION_UP 会丢，
             // 内屏认为手指一直按着，之后所有点击/滑动都被并进同一次手势
             // （表现：点不动、滑不动）。越界就把坐标夹到边界，事件照发。
-            float vx = e.getX() - mDst.left;
-            float vy = e.getY() - mDst.top;
-            // 界面翻转 180° 时，系统**只旋转绘制、不旋转触摸**（实测：
-            // 倒置后按视觉位置点图标点空，按未旋转位置点才对）。
-            // 所以这里自己把坐标镜像一次。
-            if (mFlipTouch) {
-                vx = mDst.width() - vx;
-                vy = mDst.height() - vy;
-            }
-            vx = Math.max(0f, Math.min(vx, mDst.width()));
-            vy = Math.max(0f, Math.min(vy, mDst.height()));
-            float sx = vx * mSrcW / (float) mDst.width();
-            float sy = vy * mSrcH / (float) mDst.height();
+            float[] pt = new float[2];
+            mapViewToInner(e.getX(), e.getY(), pt);
+            float sx = pt[0];
+            float sy = pt[1];
 
             switch (e.getActionMasked()) {
                 case MotionEvent.ACTION_DOWN:

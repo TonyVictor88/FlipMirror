@@ -57,8 +57,7 @@ public final class Shell {
         for (String bin : bins) {
             try {
                 Process p = Runtime.getRuntime().exec(new String[]{bin, "-c", cmd});
-                int rc = p.waitFor();
-                if (rc == 0) {
+                if (waitProcess(p, 8000)) {
                     return true;
                 }
             } catch (Throwable t) {
@@ -75,6 +74,10 @@ public final class Shell {
      *    服务端（shizuku_server）被杀或重启后，App 手里的 binder 会变成死引用，
      *    此时直接 newProcess 会抛异常；而异常被吞掉后表现为进程在、但一切静默失败 ——
      *    这是本项目反复点了没反应的根因之一。ping 一次能让客户端重新绑定。
+     *
+     * <p>必须真正等待 {@link Process} 结束并核验退出码：若不 waitFor 直接返回 true，
+     * `am force-stop pkg` 与紧随其后的 `am start --display 1` 会并发竞态，
+     * 后起的页面被 force-stop 误杀（搬到外屏偶发失败的直接诱因）。</p>
      */
     private static boolean tryShizuku(String cmd) {
         for (int attempt = 0; attempt < 2; attempt++) {
@@ -91,7 +94,14 @@ public final class Shell {
                 java.lang.reflect.Method m = rikka.shizuku.Shizuku.class.getDeclaredMethod(
                         "newProcess", String[].class, String[].class, String.class);
                 m.setAccessible(true);
-                m.invoke(null, new String[]{"/system/bin/sh", "-c", cmd}, null, null);
+                Object obj = m.invoke(null, new String[]{"/system/bin/sh", "-c", cmd}, null, null);
+                if (obj instanceof Process) {
+                    if (waitProcess((Process) obj, 10000)) {
+                        return true;
+                    }
+                    lastError = "shizuku: command exited non-zero or timed out";
+                    return false;
+                }
                 return true;
             } catch (Throwable t) {
                 lastError = "shizuku: " + t;
@@ -101,6 +111,48 @@ public final class Shell {
             }
         }
         return false;
+    }
+
+    /** 排空输出流并限时等待进程退出（用 waitFor() 避开 ShizukuRemoteProcess.exitValue() 抛 IllegalArgumentException）。 */
+    private static boolean waitProcess(final Process p, long timeoutMs) {
+        Thread outDrain = drainStream(p.getInputStream());
+        Thread errDrain = drainStream(p.getErrorStream());
+        final int[] rc = {-1};
+        Thread waiter = new Thread(() -> {
+            try {
+                rc[0] = p.waitFor();
+            } catch (Throwable ignored) { }
+        }, "shell-wait");
+        waiter.setDaemon(true);
+        waiter.start();
+        try {
+            waiter.join(timeoutMs);
+        } catch (InterruptedException ignored) {
+            try { p.destroy(); } catch (Throwable ignored2) { }
+            return false;
+        }
+        if (waiter.isAlive()) {
+            try { p.destroy(); } catch (Throwable ignored) { }
+            return false;
+        }
+        try { outDrain.join(200); } catch (InterruptedException ignored) { }
+        try { errDrain.join(200); } catch (InterruptedException ignored) { }
+        return rc[0] == 0;
+    }
+
+    private static Thread drainStream(final java.io.InputStream in) {
+        Thread t = new Thread(() -> {
+            byte[] buf = new byte[4096];
+            try {
+                while (in != null && in.read(buf) != -1) { /* discard */ }
+            } catch (Throwable ignored) {
+            } finally {
+                try { if (in != null) in.close(); } catch (Throwable ignored) { }
+            }
+        }, "shell-drain");
+        t.setDaemon(true);
+        t.start();
+        return t;
     }
 
     /**
@@ -191,11 +243,16 @@ public final class Shell {
     }
 
     /** 当前是否有可用通道（给 UI 提示用）。 */
-    public static boolean available() {        try {
-            Process p = Runtime.getRuntime().exec(new String[]{"su", "-c", "id"});
-            p.waitFor();
-            return true;
-        } catch (Throwable ignored) { }
+    public static boolean available() {
+        String[] suBins = {"su", "/system/bin/su", "/data/adb/ksu/bin/su"};
+        for (String bin : suBins) {
+            try {
+                Process p = Runtime.getRuntime().exec(new String[]{bin, "-c", "id"});
+                if (waitProcess(p, 2000)) {
+                    return true;
+                }
+            } catch (Throwable ignored) { }
+        }
         try {
             return rikka.shizuku.Shizuku.pingBinder()
                     && rikka.shizuku.Shizuku.checkSelfPermission() == 0;

@@ -74,6 +74,20 @@ public class MainActivity extends Activity {
 
     private Button mSelfCheck, mGo, mSettings, mBackHome;
     private Button mRepair;
+    /** 「搬到外屏」按钮：在"外屏原生页"与"镜像"两种态之间切换。 */
+    private Button mToCover;
+    /**
+     * 已搬到外屏（display 1）原生运行的那个组件，null 表示当前是镜像态。
+     *
+     * <p>用静态字段：切双屏/改尺寸都可能让本页重建，静态字段跨实例还在，
+     * 重建后按它把按钮文字复原，用户不会看到"明明搬过去了却还显示搬到外屏"。</p>
+     */
+    private static volatile String sCoverNativeComponent = null;
+    /** 搬运动作进行中（含停镜像后等的 1.5s），期间忽略重复点击。 */
+    private volatile boolean mMoving = false;
+    /** 从 dumpsys 的 topResumedActivity 里抽组件名：u0 后面那段 pkg/cls。 */
+    private static final java.util.regex.Pattern TOP_COMP =
+            java.util.regex.Pattern.compile("(?<=u0 )([\\w.]+/[\\w.$]+)");
     /** 自检明细的滚动区（明细再长也不挤按钮）。 */
     private android.widget.ScrollView mReportScroll;
     private TextView mReportText;
@@ -354,6 +368,19 @@ public class MainActivity extends Activity {
         });
 
 
+        // 把当前内屏前台页**原生**搬到外屏（display 1），再点一次搬回并恢复镜像。
+        // 单独占一行：现有 5 个按钮排 3+2，硬塞第 6 个会把格子挤窄。
+        Button toCover = new Button(this);
+        mToCover = toCover;
+        styleFlat(toCover, 0xFF2F5D50);
+        toCover.setText(sCoverNativeComponent == null ? "搬到外屏" : "搬回内屏");
+        toCover.setAllCaps(false);
+        LinearLayout.LayoutParams toCoverLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, Math.round(54 * d));
+        toCoverLp.setMargins(0, Math.round(7 * d), 0, Math.round(7 * d));
+        toCover.setLayoutParams(toCoverLp);
+        toCover.setOnClickListener(v -> toggleCoverNative());
+
         // 不要滚动：四键排成 2×2，一屏内全露出
         // 先把四个按钮从 root 摘下来，再按两行两列重新摆
         // 不要 removeAllViews：会把标题和状态文字一起清掉
@@ -389,6 +416,7 @@ public class MainActivity extends Activity {
 
         root.addView(row1);
         root.addView(row2);
+        root.addView(mToCover);
         setContentView(root);
 
         // 🔴 试验：不依赖 shell 直接请求 device_state = 4（双屏并发）。
@@ -529,6 +557,146 @@ public class MainActivity extends Activity {
             }
         } catch (Throwable ignored) { }
         requestProjection();
+    }
+
+    /* ------------------------------------------------ 搬到外屏 / 搬回内屏 */
+
+    /** 「搬到外屏」/「搬回内屏」的切换入口（重复点击在搬运期间被忽略）。 */
+    private void toggleCoverNative() {
+        if (mMoving) {
+            return;
+        }
+        String saved = sCoverNativeComponent;
+        if (saved != null) {
+            moveBackToInner(saved);
+        } else {
+            moveToCover();
+        }
+    }
+
+    /**
+     * 把内屏当前前台页**原生**搬到 display 1。
+     *
+     * <p>必须先停镜像：镜像是叠在 display 1 上的悬浮窗，不停掉会把原生窗口整个盖住
+     * （实测）。停完等 1.5s，让窗口管理器真正移除窗口，再 am start。</p>
+     *
+     * <p>shell 全部在后台线程，主线程只改按钮文字/状态/Toast。</p>
+     */
+    private void moveToCover() {
+        mMoving = true;
+        setMoveLabel("正在搬到外屏…");
+        setStatusText("正在搬到外屏…");
+        new Thread(() -> {
+            String comp = null;
+            try {
+                String out = Shell.execOut("dumpsys activity activities | grep topResumedActivity");
+                Log.i(TAG, "move2cover: top = " + oneLine(out));
+                if (out != null) {
+                    // 第一行就是 Display #0（内屏）的 topResumedActivity
+                    int nl = out.indexOf('\n');
+                    String first = (nl >= 0 ? out.substring(0, nl) : out).trim();
+                    java.util.regex.Matcher m = TOP_COMP.matcher(first);
+                    if (m.find()) {
+                        comp = m.group(1);
+                    }
+                }
+            } catch (Throwable t) {
+                Log.w(TAG, "move2cover: read top activity failed", t);
+            }
+            if (comp == null) {
+                finishMove("读不到当前前台页面，未搬动", false);
+                return;
+            }
+            // 前台是自己 = 用户还没打开要看的那一页，搬过去等于搬入口页，没意义
+            if (comp.startsWith("com.flip.mirror/")) {
+                finishMove("先把要看的那一页打开，再点这里", false);
+                return;
+            }
+            final String target = comp;
+            try {
+                stopService(new Intent(MainActivity.this, CoverOverlayMirrorService.class));
+                Log.i(TAG, "move2cover: mirror stopped, wait 1500ms");
+            } catch (Throwable t) {
+                Log.w(TAG, "move2cover: stopService failed", t);
+            }
+            try {
+                Thread.sleep(1500);
+            } catch (InterruptedException ignored) { }
+            boolean ok = false;
+            try {
+                ok = Shell.execSync("am start --display 1 -n " + target);
+            } catch (Throwable t) {
+                Log.w(TAG, "move2cover: am start failed", t);
+            }
+            if (ok) {
+                sCoverNativeComponent = target;
+                finishMove("已搬到外屏：" + target, true);
+                return;
+            }
+            String err = Shell.lastError;
+            Log.w(TAG, "move2cover: am start failed: " + err);
+            // 搬失败不留空屏：立刻按「开始镜像」的同一路径把镜像拉回来
+            runOnUiThread(MainActivity.this::startMirroring);
+            finishMove("搬到外屏失败" + (err == null ? "" : "：" + err), false);
+        }, "move-to-cover").start();
+    }
+
+    /** 把外屏上那个原生页搬回 display 0，然后恢复镜像。 */
+    private void moveBackToInner(final String comp) {
+        mMoving = true;
+        setMoveLabel("正在搬回内屏…");
+        setStatusText("正在搬回内屏…");
+        new Thread(() -> {
+            boolean ok = false;
+            try {
+                ok = Shell.execSync("am start --display 0 -n " + comp);
+            } catch (Throwable t) {
+                Log.w(TAG, "move2inner: am start failed", t);
+            }
+            if (!ok) {
+                // 搬不回来就别恢复镜像：原生页还占着 display 1，镜像叠上去只会打架
+                String err = Shell.lastError;
+                finishMove("搬回内屏失败" + (err == null ? "" : "：" + err), false);
+                return;
+            }
+            sCoverNativeComponent = null;
+            finishMove("已搬回内屏，正在恢复镜像…", true);
+            // 与入口页「开始镜像」同一条路径（切双屏 → 申请授权 → 悬浮层服务）
+            runOnUiThread(MainActivity.this::startMirroring);
+        }, "move-to-inner").start();
+    }
+
+    /** 搬运收尾：解锁按钮、按当前态设文字、提示。 */
+    private void finishMove(final String msg, final boolean ok) {
+        runOnUiThread(() -> {
+            mMoving = false;
+            if (mToCover != null) {
+                mToCover.setText(sCoverNativeComponent == null ? "搬到外屏" : "搬回内屏");
+            }
+            if (mStatus != null) {
+                mStatus.setText(msg);
+            }
+            try {
+                android.widget.Toast.makeText(MainActivity.this, msg,
+                        ok ? android.widget.Toast.LENGTH_SHORT : android.widget.Toast.LENGTH_LONG).show();
+            } catch (Throwable ignored) { }
+        });
+    }
+
+    private void setMoveLabel(final String s) {
+        runOnUiThread(() -> {
+            if (mToCover != null) {
+                mToCover.setText(s);
+            }
+        });
+    }
+
+    private void setStatusText(final String s) {
+        runOnUiThread(() -> {
+            if (mStatus != null) {
+                mStatus.setText(s);
+            }
+        });
     }
 
     /** 平面圆角按钮（替代系统默认的胶囊带渐变样式）。 */

@@ -40,6 +40,33 @@ public class TouchInjectorImpl implements TouchInjector {
 
     // 常驻 shell 进程里的注入服务（反射经 Proxy 绑定，规避不同 Shizuku 版本的接口签名差异）
     private Object mSvc = null;
+    /**
+     * 与 {@link #mSvc} 同一实例，但**编译期类型化**：
+     * 原来每个触摸事件都 `mSvc.getClass().getMethod("inject", ...)` + `invoke(...)`，
+     * 实测主线程 1131us/事件（峰值 4151us）—— 反射查方法 + 参数装箱占了大部分。
+     * ITouchUserService 是 AIDL 生成的、编译期可用，直接调就没有这些开销。
+     */
+    private ITouchUserService mSvcTyped = null;
+
+    // ===== 注入线程（把 binder 往返挪出主线程）=====
+    // 实测：直接在主线程 send() 里调 binder，avg 1093us / max 2671us 每个事件，
+    // onTouchEvent 被它拖住 ⇒ 画面卡顿。改为投递到单线程 Handler（FIFO 保序），
+    // 主线程只做一次 post（微秒级）。
+    private android.os.HandlerThread mInjectThread;
+    private android.os.Handler mInjectHandler;
+
+    // MOVE 合并：输入速率 > 注入速率时，只注入"最新的那个 MOVE"，中间的丢掉。
+    private volatile boolean mHasPendingMove;
+    private volatile float mPendMx, mPendMy;
+    private volatile long mPendMt;
+    private boolean mDrainPosted;
+
+    // 打点：主线程投递耗时 / 工作线程注入耗时
+    private long mPostN, mPostAccNs, mPostMaxNs;
+    private long mWorkN, mWorkAccNs, mWorkMaxNs;
+
+    // ===== 临时性能打点（测完删）=====
+    private long mPerfN, mPerfAccNs, mPerfMaxNs;
     private boolean mBinding = false;
 
     @Override
@@ -62,6 +89,10 @@ public class TouchInjectorImpl implements TouchInjector {
         if (shizukuOk && mSvc == null && !mBinding) {
             bindUserServiceReflect();
         }
+        // 预建注入线程：否则第一个触摸事件里才 new HandlerThread，会顶着 1.7ms 的尖峰
+        if (mReady) {
+            try { ensureInjectThread(); } catch (Throwable ignored) { }
+        }
         Log.i(TAG, "TouchInjector init ok=" + mReady + " svc=" + (mSvc != null));
         return mReady;
     }
@@ -81,6 +112,68 @@ public class TouchInjectorImpl implements TouchInjector {
      * 不直接实现 {@code Shizuku.ServiceConnection}：不同 api 版本的接口签名有差异，
      * 编译期实现会报"方法不会覆盖超类型的方法"。Proxy 运行时按方法名分发，绕开这个坑。
      */
+    private void ensureInjectThread() {
+        if (mInjectHandler != null) {
+            return;
+        }
+        mInjectThread = new android.os.HandlerThread("touch-inject");
+        mInjectThread.start();
+        mInjectHandler = new android.os.Handler(mInjectThread.getLooper());
+    }
+
+    /** 工作线程：把待注入的 MOVE 抽干（只发最新一个）。 */
+    private void drainMoves() {
+        while (mHasPendingMove) {
+            mHasPendingMove = false;
+            float x = mPendMx, y = mPendMy;
+            long tt = mPendMt;
+            long t0 = System.nanoTime();
+            try {
+                if (mSvcTyped != null) {
+                    mSvcTyped.inject(2, x, y, mDownTime, tt, 0);
+                }
+            } catch (Throwable e) {
+                Log.w(TAG, "svc inject(move) failed: " + e.getMessage());
+                mSvc = null;
+                mSvcTyped = null;
+            }
+            perfWork(System.nanoTime() - t0);
+        }
+        mDrainPosted = false;
+    }
+
+    private void postInject(final int act, final float x, final float y, final long t) {
+        ensureInjectThread();
+        mInjectHandler.post(new Runnable() {
+            @Override public void run() {
+                long t0 = System.nanoTime();
+                try {
+                    if (mSvcTyped != null) {
+                        mSvcTyped.inject(act, x, y, mDownTime, t, 0);
+                    }
+                } catch (Throwable e) {
+                    Log.w(TAG, "svc inject failed: " + e.getMessage());
+                    mSvc = null;
+                    mSvcTyped = null;
+                }
+                perfWork(System.nanoTime() - t0);
+            }
+        });
+    }
+
+    private void perfWork(long dt) {
+        mWorkN++;
+        mWorkAccNs += dt;
+        if (dt > mWorkMaxNs) {
+            mWorkMaxNs = dt;
+        }
+        if (mWorkN % 200 == 0) {
+            Log.i(TAG, "perf work: n=" + mWorkN
+                    + " avg=" + (mWorkAccNs / mWorkN / 1000) + "us"
+                    + " max=" + (mWorkMaxNs / 1000) + "us");
+        }
+    }
+
     private void bindUserServiceReflect() {
         mBinding = true;
         try {
@@ -129,6 +222,7 @@ public class TouchInjectorImpl implements TouchInjector {
                         if (n.equals("onServiceConnected") && argv != null && argv.length >= 2
                                 && argv[1] instanceof android.os.IBinder) {
                             mSvc = ITouchUserService.Stub.asInterface((android.os.IBinder) argv[1]);
+                            mSvcTyped = (ITouchUserService) mSvc;
                             mBinding = false;
                             Log.i(TAG, "touch userService connected");
                         } else if (n.equals("onServiceDisconnected")) {
@@ -196,7 +290,7 @@ public class TouchInjectorImpl implements TouchInjector {
         }
 
         // 快通道：直连 UserService，事件走 binder 进 InputDispatcher，无进程 fork
-        if (mSvc != null) {
+        if (mSvcTyped != null) {
             try {
                 // 🔴 关键：用**原始触摸事件的时间戳**，不是发送时刻。
                 // 之前每个事件都取 uptimeMillis()，一批 MOVE 落在同一毫秒里，
@@ -213,9 +307,36 @@ public class TouchInjectorImpl implements TouchInjector {
                     mDownX = p[0];
                     mDownY = p[1];
                 }
-                java.lang.reflect.Method m = mSvc.getClass().getMethod("inject",
-                        int.class, float.class, float.class, long.class, long.class, int.class);
-                m.invoke(mSvc, act, p[0], p[1], mDownTime, t, 0);
+                long _t0 = System.nanoTime();
+                if (action == MotionEvent.ACTION_MOVE) {
+                    // MOVE 合并：只保留最新一个，避免 binder 排队把延迟越堆越大
+                    mPendMx = p[0];
+                    mPendMy = p[1];
+                    mPendMt = t;
+                    mHasPendingMove = true;
+                    if (!mDrainPosted) {
+                        mDrainPosted = true;
+                        ensureInjectThread();
+                        mInjectHandler.post(new Runnable() {
+                            @Override public void run() { drainMoves(); }
+                        });
+                    }
+                } else {
+                    // 🔴 UP/CANCEL/DOWN 之前先清掉滞留的 MOVE：否则 drain 可能被排到 UP 之后，
+                    //    抬手后还补一帧移动 —— 拖尾/多滑一下就是这么来的。
+                    if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL
+                            || action == MotionEvent.ACTION_DOWN) {
+                        mHasPendingMove = false;
+                    }
+                    postInject(act, p[0], p[1], t);
+                }
+                long _dt = System.nanoTime() - _t0;
+                mPostN++; mPostAccNs += _dt; if (_dt > mPostMaxNs) mPostMaxNs = _dt;
+                if (mPostN % 200 == 0) {
+                    Log.i(TAG, "perf post(main): n=" + mPostN
+                            + " avg=" + (mPostAccNs / mPostN / 1000) + "us"
+                            + " max=" + (mPostMaxNs / 1000) + "us");
+                }
                 if (action == MotionEvent.ACTION_DOWN) {
                     mGestureSent = true;
                 } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
@@ -225,6 +346,7 @@ public class TouchInjectorImpl implements TouchInjector {
             } catch (Throwable e) {
                 Log.w(TAG, "svc inject failed: " + e.getMessage());
                 mSvc = null;
+                mSvcTyped = null;
             }
         }
 

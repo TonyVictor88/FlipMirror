@@ -61,9 +61,6 @@ public class TouchInjectorImpl implements TouchInjector {
     private volatile long mPendMt;
     private boolean mDrainPosted;
 
-    // 打点：主线程投递耗时 / 工作线程注入耗时
-    private long mPostN, mPostAccNs, mPostMaxNs;
-    private long mWorkN, mWorkAccNs, mWorkMaxNs;
 
     // ===== 临时性能打点（测完删）=====
     private long mPerfN, mPerfAccNs, mPerfMaxNs;
@@ -137,7 +134,6 @@ public class TouchInjectorImpl implements TouchInjector {
                 mSvc = null;
                 mSvcTyped = null;
             }
-            perfWork(System.nanoTime() - t0);
         }
         mDrainPosted = false;
     }
@@ -156,23 +152,10 @@ public class TouchInjectorImpl implements TouchInjector {
                     mSvc = null;
                     mSvcTyped = null;
                 }
-                perfWork(System.nanoTime() - t0);
-            }
+                }
         });
     }
 
-    private void perfWork(long dt) {
-        mWorkN++;
-        mWorkAccNs += dt;
-        if (dt > mWorkMaxNs) {
-            mWorkMaxNs = dt;
-        }
-        if (mWorkN % 200 == 0) {
-            Log.i(TAG, "perf work: n=" + mWorkN
-                    + " avg=" + (mWorkAccNs / mWorkN / 1000) + "us"
-                    + " max=" + (mWorkMaxNs / 1000) + "us");
-        }
-    }
 
     private void bindUserServiceReflect() {
         mBinding = true;
@@ -307,7 +290,6 @@ public class TouchInjectorImpl implements TouchInjector {
                     mDownX = p[0];
                     mDownY = p[1];
                 }
-                long _t0 = System.nanoTime();
                 if (action == MotionEvent.ACTION_MOVE) {
                     // MOVE 合并：只保留最新一个，避免 binder 排队把延迟越堆越大
                     mPendMx = p[0];
@@ -330,13 +312,7 @@ public class TouchInjectorImpl implements TouchInjector {
                     }
                     postInject(act, p[0], p[1], t);
                 }
-                long _dt = System.nanoTime() - _t0;
-                mPostN++; mPostAccNs += _dt; if (_dt > mPostMaxNs) mPostMaxNs = _dt;
-                if (mPostN % 200 == 0) {
-                    Log.i(TAG, "perf post(main): n=" + mPostN
-                            + " avg=" + (mPostAccNs / mPostN / 1000) + "us"
-                            + " max=" + (mPostMaxNs / 1000) + "us");
-                }
+
                 if (action == MotionEvent.ACTION_DOWN) {
                     mGestureSent = true;
                 } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {

@@ -2396,8 +2396,13 @@ public class CoverOverlayMirrorService extends Service {
             }
             vx = Math.max(0f, Math.min(vx, mDst.width()));
             vy = Math.max(0f, Math.min(vy, mDst.height()));
-            out[0] = vx * mSrcW / (float) mDst.width();
-            out[1] = vy * mSrcH / (float) mDst.height();
+            // 🔴 2026-11-20 实测：mSrcW/mSrcH 会被别的路径写脏（抓到过 908x874，
+            //    正确是 1080x944），映射就会整体缩放错位 —— 表现为"触摸往左偏一个图标"。
+            //    以**实际帧位图尺寸**为准：那才是屏幕上真正画出来的东西。
+            final int bw = (mBmp != null && mBmp.getWidth() > 0) ? mBmp.getWidth() : mSrcW;
+            final int bh = (mBmp != null && mBmp.getHeight() > 0) ? mBmp.getHeight() : mSrcH;
+            out[0] = vx * bw / (float) mDst.width();
+            out[1] = vy * bh / (float) mDst.height();
         }
 
         @Override

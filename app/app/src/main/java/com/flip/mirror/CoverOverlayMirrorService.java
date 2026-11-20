@@ -1328,6 +1328,13 @@ public class CoverOverlayMirrorService extends Service {
                 mBar.wakeUp();
             }
         } catch (Throwable ignored) { }
+        // 单实例（v2.6.4）：退出时注入器进程被杀了（见 shutdown），
+        // 这里在后台重新握手，保证回来的第一下点击就有效。
+        try {
+            if (MirrorCanvasView.sTouch != null) {
+                MirrorCanvasView.sTouch.rearm();
+            }
+        } catch (Throwable ignored) { }
         startBarWatchdogOnce();
     }
 
@@ -2039,6 +2046,13 @@ public class CoverOverlayMirrorService extends Service {
             releaseWakeLock();
             KeepAliveReceiver.cancel(this);
         } catch (Throwable ignored) { }
+        // 🔴 单实例（v2.6.4）：退出镜像 = 把注入器进程一起带走，别留 ppid=1 的孤儿。
+        //    放后台线程（pkill 是一次 shell 往返，不能卡主线程）；
+        //    下次 showAgain() 会 rearm 重新握手，所以不会退化成"点不动"。
+        try {
+            new Thread(() -> TouchInjectorImpl.killStaleInstances("mirror exit"),
+                    "touch-cleanup").start();
+        } catch (Throwable ignored) { }
 
         try {
             if (mRoot != null && mWm != null) {
@@ -2147,6 +2161,33 @@ public class CoverOverlayMirrorService extends Service {
         try {
             new java.io.File(getFilesDir(), "mirror_running.flag").delete();
         } catch (Throwable ignored) { }
+        // 🔴 单实例（v2.6.4）：服务真的没了，就把注入器进程一起带走。
+        //    它是 Shizuku 以 shell 身份拉起的 com.flip.mirror:touch，
+        //    我们进程死了它不会被回收（ppid=1 孤儿），下次进镜像又多一个 ⇒
+        //    多个注入器抢同一块触摸 ⇒ 触控丢失/错乱（真机抓过 3 个）。
+        //    放后台线程：pkill 要一次 shell 往返，别卡住 onDestroy。
+        //    兜底：即使这里没跑到（进程被强杀），下次绑定时也会先清一遍
+        //    （TouchInjectorImpl.bindUserServiceReflect → killStaleInstances）。
+        try {
+            new Thread(() -> TouchInjectorImpl.killStaleInstances("service onDestroy"),
+                    "touch-cleanup").start();
+        } catch (Throwable ignored) { }
+        // 🔴 v2.6.4：**异常结束就别再自动武装**。
+        //    desired_mirror=true 时，MirrorState.reconcile() 会把入口页带 auto_start 拉起来，
+        //    进去又起不来、再被拉 —— 真机表现就是"点个修复自己跳进投屏 / 循环投外屏"。
+        //    判据：本次会话**一帧都没出过**（mFrameCount==0）⇒ 属于"起了但没起来"的失败会话，
+        //    一律解除武装，切断重入循环。
+        //    ⚠️ 出过帧的正常会话（关屏被三星回收等）保持 true 不动 —— 那是"关屏回来自动恢复"依赖的。
+        //    用户点 ✕ 的正常退出，shutdown() 已经写过 false，这里不会再变。
+        if (mFrameCount == 0) {
+            try {
+                if (MirrorState.desired(this)) {
+                    MirrorState.setDesired(this, false);
+                    KeepAliveReceiver.cancel(this);
+                    Log.i(TAG, "destroyed without frames -> desired_mirror = false (disarm)");
+                }
+            } catch (Throwable ignored) { }
+        }
         mProjectionAlive = false;
         sRunning = false;
         sInst = null;

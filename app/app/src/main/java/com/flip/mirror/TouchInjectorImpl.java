@@ -64,7 +64,8 @@ public class TouchInjectorImpl implements TouchInjector {
 
     // ===== 临时性能打点（测完删）=====
     private long mPerfN, mPerfAccNs, mPerfMaxNs;
-    private boolean mBinding = false;
+    /** 绑定流程现在跑在工作线程（先清陈旧实例再 bind），主线程也会读，故 volatile。 */
+    private volatile boolean mBinding = false;
 
     @Override
     public boolean init() {
@@ -157,8 +158,57 @@ public class TouchInjectorImpl implements TouchInjector {
     }
 
 
+    /**
+     * 单实例化：杀掉所有**陈旧**的注入器进程（{@code com.flip.mirror:touch}）。
+     *
+     * <p>真机实测（2026-11-20）：每进一次镜像就多一个 {@code com.flip.mirror:touch}，
+     * uid=shell、ppid=1（已被 init 收养），{@code am force-stop com.flip.mirror} 杀不掉。
+     * 多个注入器同时往 display 0 灌事件 ⇒ 点击被其中一个吃掉 / 双发 ⇒
+     * 用户看到的就是"触控丢失、错乱"，以及行为越来越乱的"循环"。
+     *
+     * <p>时机：**每次绑定 UserService 之前**跑一次（见 {@link #bindUserServiceReflect()}），
+     * 保证"先清空、再握手"，任何时刻最多只有一个注入器。
+     * 另外服务 onDestroy 时也会叫一次（见 CoverOverlayMirrorService）。
+     *
+     * <p>注意：无 root / 无 Shizuku 时这里会静默失败（Shell.execSync 返回 false），
+     * 但那两种情况本来也起不了注入器，不会产生新孤儿。
+     */
+    static void killStaleInstances(String why) {
+        // 🔴 匹配串里的 [.] 是故意拆开的：pkill -f 会匹配整条命令行，
+        //    直接写 flip.mirror:touch 会把执行这条命令的 sh -c 自己也匹配进去。
+        // 没有 pkill 的机型退回 ps + kill；末尾 `true` 让"一个都没匹配到"不算失败。
+        final String cmd =
+                "(pkill -9 -f 'flip[.]mirror:touch' 2>/dev/null) || "
+                        + "(ps -A -o PID,ARGS 2>/dev/null | grep 'flip[.]mirror:touch' "
+                        + "| awk '{print $1}' | while read p; do kill -9 $p 2>/dev/null; done); "
+                        + "sleep 0.2; true";
+        boolean ok = Shell.execSync(cmd);
+        Log.i(TAG, "kill stale touch injectors (" + why + ") -> " + ok);
+    }
+
+    /**
+     * 绑定 Shizuku UserService（注入器进程）。
+     *
+     * <p>v2.6.4：改到**工作线程**里做，且先 {@link #killStaleInstances} 再绑定。
+     * 原来这两步都在主线程（View 构造 → showOverlay → onCreate），
+     * 加了一次 shell 往返会把镜像启动顶住；放后台既不影响启动，顺序也更可控。
+     */
     private void bindUserServiceReflect() {
+        if (mBinding) {
+            return;   // 已经有一次握手在飞，别并发绑出第二个进程
+        }
         mBinding = true;
+        new Thread(() -> {
+            try {
+                killStaleInstances("before bind");
+            } catch (Throwable t) {
+                Log.w(TAG, "kill stale injectors failed: " + t);
+            }
+            doBindUserService();
+        }, "touch-bind").start();
+    }
+
+    private void doBindUserService() {
         try {
             ClassLoader cl = Shizuku.class.getClassLoader();
             Class<?> argsCls = Class.forName("rikka.shizuku.Shizuku$UserServiceArgs", true, cl);
@@ -417,5 +467,25 @@ public class TouchInjectorImpl implements TouchInjector {
     @Override
     public void release() {
         mReady = false;
+    }
+
+    /**
+     * 重新握手：镜像被重新显示（{@code showAgain}）时调用。
+     *
+     * <p>退出镜像时我们把注入器进程一起杀了（单实例，见 {@link #killStaleInstances}），
+     * 手里的 binder 就成了死引用。这里先等一下那次 kill 落定，再 init + 绑定，
+     * 保证"回来的第一下点击"就能用，而不是等第一次点击失败后 2~3 秒才自愈。
+     */
+    @Override
+    public void rearm() {
+        new Thread(() -> {
+            try {
+                Thread.sleep(300);
+            } catch (InterruptedException ignored) { }
+            mReady = false;
+            mSvc = null;
+            mSvcTyped = null;
+            init();   // init 内部会走 bindUserServiceReflect（先清陈旧实例，再绑定）
+        }, "touch-rearm").start();
     }
 }

@@ -45,4 +45,13 @@ public interface TouchInjector {
 
     /** 设置源屏尺寸（外屏可视区域）与目标屏尺寸（内屏）。 */
     void setGeometry(int srcW, int srcH, int dstW, int dstH);
+
+    /**
+     * 重新握手（镜像隐藏后又被重新显示时调用）。
+     *
+     * <p>退出镜像时注入器进程会被主动杀掉（单实例，见 TouchInjectorImpl#killStaleInstances），
+     * 手里的 binder 就成了死引用 —— 重新显示时需要在后台重新 init + 绑定，
+     * 否则"回来的第一下点击"会丢。
+     */
+    default void rearm() { }
 }

@@ -104,6 +104,13 @@ public class MainActivity extends Activity {
     private static final int F_GESTURE = 1 << 5;// 输入手势卡死
     private static final int F_SECURE = 1 << 6; // 屏幕上有受保护内容（secure 层）
 
+    /**
+     * F_GESTURE 已尝试"重启 SystemUI"但仍清不掉 ⇒ 只能重启设备。
+     * 置 true 后：❌ 行改成"需要重启设备"，且若这是唯一异常就禁用修复按钮
+     * （不能让用户去点一个注定修不好的按钮）。
+     */
+    private volatile boolean mGestureNeedsReboot = false;
+
     private void autoPrepScreen() {
         new Thread(() -> {
             try {
@@ -187,6 +194,21 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // 🔴 v2.6.4：**手动打开 ⇒ 解除"自动武装"**。
+        //    背景（真机复现）：desired_mirror 残留为 true 时，页面一重建（崩溃/配置变更），
+        //    MirrorState.reconcile() 就会带着 auto_start 把入口页拉起来、150ms 后自动申请录屏
+        //    ⇒ 用户看到"点个修复自己跳进投屏"。
+        //    语义：用户亲手打开 App = 他要的是入口页，不是被拉去投屏。
+        //    ⚠️ 只在**没有在投屏**时解除：正在显示镜像时点图标会走下面的 isShowing() 分支直接 finish，
+        //       那种情况不能解除，否则"关屏回来自动恢复"就被关掉了。
+        //    带 auto_start 的启动（看门狗/恢复链）不在这里处理 —— 它本来就要继续投屏。
+        final boolean autoLaunch = getIntent() != null
+                && getIntent().getBooleanExtra("auto_start", false);
+        if (!autoLaunch && !CoverOverlayMirrorService.isShowing()) {
+            MirrorState.setDesired(this, false);
+            KeepAliveReceiver.cancel(this);
+            Log.i(TAG, "manual open -> desired_mirror = false (disarm auto launch)");
+        }
         // 有概率被启动到内屏（display 0）—— 内屏本来就坏，等于什么都没发生。
         // 检测到就立刻把自己搬到外屏再退出本实例。
         try {
@@ -940,15 +962,31 @@ public class MainActivity extends Activity {
      *   ③ 双屏并发已置上（cmd device_state state 4）
      */
     private void runSelfCheck() {
-        if (mReportText != null) {
-            mReportText.setText("自检中…（只读，不改任何东西）");
-        }
-        if (mStatus != null) {
-            mStatus.setText("当前 display = " + (getDisplay() != null ? getDisplay().getDisplayId() : -1));
-        }
+        // 🔴 本方法会被**后台线程**调进来（「② 修复」的 self-repair 线程修完会重跑自检）。
+        //    v2.6.3 在这里直接 setText，真机抛
+        //    ViewRootImpl$CalledFromWrongThreadException（MainActivity.java:944）崩了 2 次；
+        //    崩掉后 Activity 重建，用户看到的就是"自动跳进投屏 / 黑屏 / 循环"。
+        //    所以：所有触碰 View 的语句一律回主线程，耗时探测仍留在下面的后台线程。
+        runOnUiThread(() -> {
+            if (isFinishing() || isDestroyed()) {
+                return;
+            }
+            if (mReportText != null) {
+                mReportText.setText("自检中…（只读，不改任何东西）");
+            }
+            if (mStatus != null) {
+                mStatus.setText("当前 display = "
+                        + (getDisplay() != null ? getDisplay().getDisplayId() : -1));
+            }
+        });
         new Thread(() -> {
-            StringBuilder sb = new StringBuilder();
+            // 🔴 v2.6.5：失败项单独攒到 bad，渲染时**永远排在最上面**，
+            //    保证"说有 1 项异常"时第一屏就能看见是哪一项、该怎么办。
+            //    （之前只有一块 sb，报告 10 行、可视区只够 2 行，❌ 被顶到看不见的地方。）
+            StringBuilder bad = new StringBuilder();
+            StringBuilder good = new StringBuilder();
             int fails = 0;
+            int manualIssues = 0;   // 人工项（Shizuku 授权）：不计可修复位，但必须如实报出来
 
             // ① Shizuku
             boolean shizukuOk = false;
@@ -960,8 +998,12 @@ public class MainActivity extends Activity {
                 }
             } catch (Throwable ignored) { }
             shizukuOk = shizukuOk && perm == 0;
-            sb.append(shizukuOk ? "✅ Shizuku 已授权"
-                    : "❌ Shizuku 未授权（只能人工重新授权）");
+            if (shizukuOk) {
+                good.append("\n✅ Shizuku 已授权");
+            } else {
+                manualIssues++;
+                bad.append("\n❌ Shizuku 未授权 · 打开 Shizuku App 重新授权（本页无法代劳）");
+            }
 
             // ② 外屏
             boolean coverOk = false;
@@ -971,58 +1013,71 @@ public class MainActivity extends Activity {
                 android.view.Display d1 = dm == null ? null : dm.getDisplay(1);
                 coverOk = d1 != null && d1.getState() != android.view.Display.STATE_OFF;
             } catch (Throwable ignored) { }
-            sb.append("\n").append(coverOk ? "✅ 外屏在线" : "❌ 外屏未就绪（确认是展开状态）");
+            if (coverOk) {
+                good.append("\n✅ 外屏在线");
+            } else {
+                manualIssues++;
+                bad.append("\n❌ 外屏未就绪 · 确认手机处于展开状态后再点「② 修复」");
+            }
 
             if (!shizukuOk) {
-                finishSelfCheck(sb, fails);
+                finishSelfCheck(bad, good, fails, manualIssues);
                 return;
             }
 
             // ③ 双屏并发（关屏会把它撤掉，掉了外屏就黑）
             String st = Shell.execOut("cmd device_state state");
             boolean dualOk = st != null && st.contains("CONCURRENT_INNER_DEFAULT");
-            if (!dualOk) {
+            if (dualOk) {
+                good.append("\n✅ 双屏并发已开");
+            } else {
                 fails |= F_DUAL;
+                bad.append("\n❌ 双屏并发掉了（外屏会黑） · 点「② 修复」重开 state 4");
             }
-            sb.append("\n").append(dualOk ? "✅ 双屏并发已开" : "❌ 双屏并发掉了（外屏会黑）");
 
             // ④ 内屏尺寸（期望值来自**设置**，不能硬编码 —— 用户在设置里改过就会永远报红）
             SettingsStore sett = new SettingsStore(this);
             final int expW = sett.innerWidth(), expH = sett.innerHeight(), expDpi = sett.innerDpi();
             String sz = Shell.execOut("wm size");
             boolean sizeOk = sz != null && sz.contains(expW + "x" + expH);
-            if (!sizeOk) {
+            if (sizeOk) {
+                good.append("\n✅ 内屏尺寸 ").append(expW).append("x").append(expH);
+            } else {
                 fails |= F_SIZE;
+                bad.append("\n❌ 尺寸不对（期望 ").append(expW).append("x").append(expH)
+                   .append("，实际 ").append(oneLine(sz)).append("） · 点「② 修复」重设");
             }
-            sb.append("\n").append(sizeOk ? "✅ 内屏尺寸 " + expW + "x" + expH
-                    : "❌ 尺寸不对（期望 " + expW + "x" + expH + "）：" + oneLine(sz));
 
             // ⑤ 内屏密度
             String dn = Shell.execOut("wm density");
             boolean densOk = dn != null && dn.contains(String.valueOf(expDpi));
-            if (!densOk) {
+            if (densOk) {
+                good.append("\n✅ 内屏密度 ").append(expDpi);
+            } else {
                 fails |= F_DENS;
+                bad.append("\n❌ 密度不对（期望 ").append(expDpi)
+                   .append("，实际 ").append(oneLine(dn)).append("） · 点「② 修复」重设");
             }
-            sb.append("\n").append(densOk ? "✅ 内屏密度 " + expDpi
-                    : "❌ 密度不对（期望 " + expDpi + "）：" + oneLine(dn));
 
             // ⑥ 防误触（三星那层全屏页会吞掉全部触摸）
             String pk = Shell.execOut("settings get system screen_off_pocket");
             boolean pocketOk = pk != null && "0".equals(pk.trim());
-            if (!pocketOk) {
+            if (pocketOk) {
+                good.append("\n✅ 防误触已关");
+            } else {
                 fails |= F_POCKET;
+                bad.append("\n❌ 防误触还开着 · 点「② 修复」关掉（它会吞掉全部触摸）");
             }
-            sb.append("\n").append(pocketOk ? "✅ 防误触已关"
-                    : "❌ 防误触还开着（会吞触摸）");
 
             // ⑦ 投影 appop（免授权弹窗）
             String op = Shell.execOut("appops get com.flip.mirror PROJECT_MEDIA");
             boolean opOk = op != null && op.contains("allow");
-            if (!opOk) {
+            if (opOk) {
+                good.append("\n✅ 免授权弹窗已生效");
+            } else {
                 fails |= F_OP;
+                bad.append("\n❌ 投影授权项未开 · 点「② 修复」恢复（否则每次启动都弹授权）");
             }
-            sb.append("\n").append(opOk ? "✅ 免授权弹窗已生效"
-                    : "❌ 投影授权项未开（每次启动会弹窗）");
 
             // ⑧ 输入手势卡死（2026-11-13 那次"触摸全失效"的真因）
             String inp = Shell.execOut("dumpsys input");
@@ -1031,11 +1086,15 @@ public class MainActivity extends Activity {
             Log.i(TAG, "self-check: dumpsys input = "
                     + (inp == null ? "读不到" : inp.length() + " 字符"));
             boolean gestureOk = inp != null && !hasStuckGesture(inp);
-            if (!gestureOk) {
+            if (gestureOk) {
+                mGestureNeedsReboot = false;
+                good.append("\n✅ 输入手势正常");
+            } else {
                 fails |= F_GESTURE;
+                bad.append(mGestureNeedsReboot
+                        ? "\n❌ 输入手势卡死（触摸会全失效） · 重启 SystemUI 无效，需要重启手机"
+                        : "\n❌ 输入手势卡死（触摸会全失效） · 点「② 修复」重启 SystemUI 清除（状态栏会闪一下）");
             }
-            sb.append("\n").append(gestureOk ? "✅ 输入手势正常"
-                    : "❌ 输入手势卡死（触摸会全失效）");
 
             // ⑨ 受保护内容（2026-11-18 实测）：SurfaceFlinger 里存在 (Secure) 层时，
             //    镜像拿到的是黑帧 —— 这是系统防截屏，**不是本 App 的故障**，也无法自动修。
@@ -1047,12 +1106,12 @@ public class MainActivity extends Activity {
             } catch (Throwable ignored) { }
             if (secLayers > 0) {
                 fails |= F_SECURE;
-                sb.append("\n❌ 受保护内容 ").append(secLayers)
-                  .append(" 层（该页镜像会全黑 · 系统防截屏，无法自动修）");
+                bad.append("\n❌ 受保护内容 ").append(secLayers)
+                   .append(" 层 · 无法自动修：折叠展开用内屏看这一页（镜像必然是黑帧）");
             } else if (secLayers == 0) {
-                sb.append("\n✅ 无受保护内容");
+                good.append("\n✅ 无受保护内容");
             } else {
-                sb.append("\nℹ️ 受保护内容：读不到（不影响使用）");
+                good.append("\nℹ️ 受保护内容：读不到（不影响使用）");
             }
 
             // ⑩ 原生外屏态（信息项，**不计 fails**）：页面被搬到外屏时镜像本身是停的，
@@ -1061,29 +1120,60 @@ public class MainActivity extends Activity {
             if (nativeComp != null) {
                 String shown = nativeComp.length() > 60
                         ? nativeComp.substring(0, 60) + "…" : nativeComp;
-                sb.append("\n⚠️ 原生外屏态：").append(shown)
-                  .append("（镜像已停，页面直接跑在外屏）");
+                good.append("\n⚠️ 原生外屏态：").append(shown)
+                    .append("（镜像已停，页面直接跑在外屏）");
             } else {
-                sb.append("\n✅ 镜像态（未搬到外屏）");
+                good.append("\n✅ 镜像态（未搬到外屏）");
             }
 
-            finishSelfCheck(sb, fails);
+            finishSelfCheck(bad, good, fails, manualIssues);
         }, "self-check").start();
     }
 
-    /** 自检收尾：写状态、记失败位、决定修复按钮能不能点。 */
-    private void finishSelfCheck(StringBuilder sb, int fails) {
+    /**
+     * 自检收尾：把 ❌ 行排在**最前面**、✅ 行排后面，再写状态栏与修复按钮。
+     *
+     * <p>v2.6.5：以前所有行混在一个 StringBuilder 里，10 行报告 + 可视区只有约 2 行
+     * ⇒ 出现"说有 1 项异常，但屏幕上只有两条 ✅，根本看不到是哪项"。
+     * 现在失败项固定置顶，且状态栏直接写出项名，滑都不用滑。
+     *
+     * @param bad        以 "\n" 开头的失败/人工项行
+     * @param good       以 "\n" 开头的正常行
+     * @param fails      可修复位（F_xxx 掩码）
+     * @param manualIssues 人工项数（Shizuku 未授权、外屏未就绪）：无位可修，但要如实报
+     */
+    private void finishSelfCheck(StringBuilder bad, StringBuilder good, int fails, int manualIssues) {
         mFails = fails;
-        if (fails == 0) {
-            sb.append("\n\n全部正常，可以开始镜像。");
-        } else {
-            sb.append("\n\n有 ").append(Integer.bitCount(fails))
-              .append(" 项异常 ⇒ 点「② 修复」（只修这几项）");
+        final int total = Integer.bitCount(fails) + manualIssues;
+        StringBuilder sb = new StringBuilder();
+        if (bad.length() > 1) {
+            sb.append(bad.substring(1));          // 去掉开头那个 "\n"
         }
+        if (good.length() > 1) {
+            if (sb.length() > 0) {
+                sb.append("\n");
+            }
+            sb.append(good.substring(1));
+        }
+        sb.append(total == 0 ? "\n\n全部正常，可以开始镜像。"
+                : "\n\n有 " + total + " 项异常 ⇒ 点「② 修复」（只修这几项）");
+
+        // 状态栏只放"第一项异常"的短名，保证一眼看见
+        String firstIssueTmp = null;
+        if (bad.length() > 1) {
+            String line = bad.substring(1).split("\n")[0].trim();
+            int cut = line.indexOf(" · ");
+            firstIssueTmp = (cut > 0 ? line.substring(0, cut) : line).replace("❌", "").trim();
+        }
+        final String firstIssue = firstIssueTmp;   // lambda 里要用，必须是 effectively final
+
         final String msg = sb.toString();
-        Log.i(TAG, "self-check " + (fails == 0 ? "PASS" : "FAIL(" + fails + ")") + " | "
+        Log.i(TAG, "self-check " + (total == 0 ? "PASS" : "FAIL(" + fails + ")") + " | "
                 + msg.replace("\n", " / "));
         runOnUiThread(() -> {
+            if (isFinishing() || isDestroyed()) {
+                return;
+            }
             if (mReportText != null) {
                 mReportText.setText(msg);
             }
@@ -1091,10 +1181,13 @@ public class MainActivity extends Activity {
                 mReportScroll.scrollTo(0, 0);
             }
             if (mStatus != null) {
-                mStatus.setText(fails == 0 ? "自检通过" : ("有 " + Integer.bitCount(fails) + " 项异常"));
+                mStatus.setText(total == 0 ? "自检通过"
+                        : ("有 " + total + " 项异常" + (firstIssue == null ? "" : "：" + firstIssue)));
             }
             if (mRepair != null) {
-                mRepair.setEnabled(fails != 0);
+                // 卡死手势已确认"重启 SystemUI 也修不掉"、且它是唯一异常 ⇒ 别让用户白点
+                boolean onlyUnfixableGesture = (fails == F_GESTURE) && mGestureNeedsReboot;
+                mRepair.setEnabled(fails != 0 && !onlyUnfixableGesture);
                 // 标签要短：三个按钮平分 748px，写成「② 修复（1 项）」会被截成「② 修复（1」
                 mRepair.setText(fails != 0
                         ? "② 修复·" + Integer.bitCount(fails) : "② 修复");
@@ -1109,6 +1202,12 @@ public class MainActivity extends Activity {
      * `touchingPointers=[Pointer(id=N, FINGER)]` 就说明系统认为某根手指一直没抬起，
      * 之后所有点击/滑动都会被并进那次僵死手势（表现为"画面在、点什么都不动"）。
      * 注意空值是 `touchingPointers=[]`，所以不能只判 `touchingPointers` 这个串。
+     *
+     * <p>🔴 2026-11-20 复盘：曾一度想"排除 [Gesture Monitor]"，**这是错的，已撤回**。
+     *    真机 `FAIL(32)` 报的就是那条 —— 它挂在 SystemUI 创建的
+     *    `[Gesture Monitor] edge-swipe` 窗口上，正是"触摸全失效"的元凶；
+     *    清它的唯一有效手段是重建 SystemUI（`am crash com.android.systemui`），
+     *    `am force-stop` 桌面打不到它。故判据保持原样：**出现 Pointer 就算异常**。
      */
     private static boolean hasStuckGesture(String dumpsysInput) {
         if (dumpsysInput == null) {
@@ -1120,7 +1219,28 @@ public class MainActivity extends Activity {
         }
         int end = dumpsysInput.indexOf("CursorStatesByDisplay", i);
         String seg = dumpsysInput.substring(i, end > i ? end : Math.min(dumpsysInput.length(), i + 4000));
-        return seg.contains("touchingPointers=[Pointer");
+        boolean stuck = seg.contains("touchingPointers=[Pointer");
+        if (stuck) {
+            // 只打日志、不参与判定：把命中的窗口名写出来，方便定位是谁在粘手
+            try {
+                String cur = null;
+                for (String raw : seg.split("\n")) {
+                    String ln = raw.trim();
+                    int ni = ln.indexOf("name='");
+                    if (ni >= 0) {
+                        int close = ln.indexOf('\'', ni + 6);
+                        if (close > ni) {
+                            cur = ln.substring(ni + 6, close);
+                        }
+                    }
+                    if (ln.contains("touchingPointers=[Pointer")) {
+                        Log.w(TAG, "stuck gesture on window: " + cur);
+                        break;
+                    }
+                }
+            } catch (Throwable ignored) { }
+        }
+        return stuck;
     }
 
     private static String oneLine(String s) {
@@ -1138,14 +1258,10 @@ public class MainActivity extends Activity {
     private void runRepair() {
         final int fails = mFails;
         if (fails == 0) {
-            if (mStatus != null) {
-                mStatus.setText("没有需要修复的项。");
-            }
+            setStatusText("没有需要修复的项。");   // 走 runOnUiThread，后台调也安全
             return;
         }
-        if (mStatus != null) {
-            mStatus.setText("修复中…（只修标红项）");
-        }
+        setStatusText("修复中…（只修标红项）");
         new Thread(() -> {
             StringBuilder log = new StringBuilder();
             if ((fails & F_DUAL) != 0) {
@@ -1183,11 +1299,44 @@ public class MainActivity extends Activity {
                 log.append("   出口：折叠展开，用内屏看这一页；或让我用 adb 直接改对应设置\n");
             }
             if ((fails & F_GESTURE) != 0) {
-                // 唯一能清掉`[Gesture Monitor]` 上僵死指针的办法（CANCEL/关屏/重置双屏都试过无效）。
-                // 副作用：最近任务列表清空；桌面会自己重开。
-                log.append(Shell.execSync("am force-stop com.sec.android.app.launcher")
-                        ? "✅ 已重启桌面，卡死手势清除（最近任务被清空）\n"
-                        : "❌ 桌面重启失败\n");
+                // 🔴 v2.6.5：清卡死指针的**唯一有效手段**（真机实测 2026-11-20）。
+                //    那条 Pointer 挂在 SystemUI 创建的 `[Gesture Monitor] edge-swipe` 窗口上，
+                //    只有 SystemUI 重建这个窗口才会掉；之前 `am force-stop 桌面`
+                //    打的是 launcher 进程，跟手势监视器无关 ⇒ 点一百次也修不掉。
+                //    副作用：状态栏/导航栏闪一下、几秒后自己回来，不影响数据。
+                log.append("⏳ 正在重启 SystemUI（状态栏/导航栏会闪一下，不影响数据）…\n");
+                setStatusText("正在重启 SystemUI…（状态栏/导航栏会闪一下，不影响数据）");
+                String pidBefore = Shell.execOut("pidof com.android.systemui");
+                Log.i(TAG, "systemui pid before = "
+                        + (pidBefore == null ? "读不到" : pidBefore.trim()));
+                boolean cmdOk = Shell.execSync("am crash com.android.systemui");
+                if (!cmdOk) {
+                    Log.w(TAG, "am crash systemui failed: " + Shell.lastError);
+                    cmdOk = Shell.execSync("pkill -f com.android.systemui");
+                }
+                // 结果校验：SystemUI 回来要 3~8 秒；最多等 15 秒。
+                // 唯一的成功判据是「粘手计数归 0」—— pid 变了只说明它重启过，不说明指针掉了。
+                boolean cleared = false;
+                String pidAfter = null;
+                for (int t = 0; t < 10 && !cleared; t++) {
+                    try {
+                        Thread.sleep(1500);
+                    } catch (InterruptedException ignored) { }
+                    String again = Shell.execOut("dumpsys input");
+                    cleared = again != null && !hasStuckGesture(again);
+                    if (pidAfter == null) {
+                        pidAfter = Shell.execOut("pidof com.android.systemui");
+                    }
+                }
+                Log.i(TAG, "systemui pid after = "
+                        + (pidAfter == null ? "读不到" : pidAfter.trim()) + ", cleared=" + cleared);
+                if (cleared) {
+                    mGestureNeedsReboot = false;
+                    log.append("✅ 已重启 SystemUI 清除卡死手势\n");
+                } else {
+                    mGestureNeedsReboot = true;
+                    log.append("❌ 仍卡死，需要重启手机\n");
+                }
             }
             Log.i(TAG, "repair done: " + log.toString().replace("\n", " / "));
             runSelfCheck();   // 修完自己再验一遍，结果直接盖到状态栏

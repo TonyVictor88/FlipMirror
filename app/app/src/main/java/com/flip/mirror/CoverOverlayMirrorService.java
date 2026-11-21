@@ -294,6 +294,8 @@ public class CoverOverlayMirrorService extends Service {
         registerScreenOnRecovery();
         // D 方案：受保护内容（secure 页必然全黑）自动感应 → 外屏弹「搬到外屏？」
         startSecureWatch();
+        // v2.6.6：系统弹窗（授权/VPN 等）遮挡导致镜像全黑时，外屏给一条说明横条
+        startPopupWatch();
     }
 
     private void startForegroundWithNotification() {
@@ -926,6 +928,7 @@ public class CoverOverlayMirrorService extends Service {
             //    表现就是"右上角四个键很难按到"（实测）。单窗口没有层级竞争。
             // 去重：上一次的根容器若还在，先摘掉，避免叠出多个全屏窗
             if (mRoot != null && mWm != null) {
+                detachPopupBar();      // 根容器要重建，提示条跟着一起摘（否则挂在旧 root 上）
                 try {
                     mWm.removeView(mRoot);
                 } catch (Throwable ignored) { }
@@ -1089,6 +1092,11 @@ public class CoverOverlayMirrorService extends Service {
                     //    这里必须**先 acquire 再判断** —— maxImages=2 时如果拿到新帧却不取走，
                     //    生产端很快没有空闲 buffer，回调从此不再来（画面卡死）。
                     if (mFramePending) {
+                        return;
+                    }
+                    // 🔴 v2.6.7：系统弹窗遮挡期间不画新帧（弹窗期的帧是坏的：黑底巨绿圆等）。
+                    //    这里 return 不影响缓冲回收 —— finally 里照样 close，生产端不会断流。
+                    if (mRenderPaused) {
                         return;
                     }
                     // 🔴 双缓冲复用：原来每帧 createBitmap(1080x944) = 4.08MB、60fps 下 245MB/秒的分配，
@@ -1593,6 +1601,475 @@ public class CoverOverlayMirrorService extends Service {
         mPrompt = null;
     }
 
+    /* ------------------------------------------- 系统弹窗遮挡提示（v2.6.6） */
+
+    /**
+     * 巡检间隔：2 秒。只在镜像运行期间跑。
+     *
+     * <p>为什么需要：Clash（{@code com.github.metacubex.clash.meta}）首次运行会弹
+     * {@code com.google.android.permissioncontroller/...GrantPermissionsActivity}。
+     * 弹窗期间 {@code screencap -d 0 -p} 直接返回 <b>Capturing failed</b>，
+     * 而 SurfaceFlinger 里 {@code (Secure)} 层数仍是 <b>0</b> —— 上面那套三信号复核抓不到，
+     * 结果镜像变成纯黑（外屏只剩顶部控件条）；按 BACK 关掉弹窗立刻恢复。
+     * 所以这里不判"黑"，只判"前台窗口是那几个弹窗宿主包"。
+     *
+     * <p>v2.6.6 起命中就显示提示条；v2.6.9 起同拍还会 dump 一次 UI 层级并自动点「允许」
+     * （见 {@link #autoAllowPopup(String)}）—— 内屏坏了看不见弹窗，只能由服务代点。
+     */
+    private static final long POPUP_POLL_MS = 2000;
+
+    /**
+     * 判定为「系统弹窗遮挡」的前台包名（topResumedActivity 的所属包，精确相等）。
+     *
+     * <p>🔴 v2.6.8：只留**真正的模态阻塞弹窗**宿主。
+     * 原来还列了 {@code com.android.settings} / {@code com.android.systemui} —— 那两个
+     * 承载的是正常界面（设置页、状态栏/音量），前台一到它们就停渲染，结果用户一打开
+     * 「设置」外屏立刻黑屏冻结，从投屏里完全进不去设置。正常界面抓帧本来就是好的，
+     * 没有任何理由暂停。
+     */
+    private static final String[] POPUP_PKGS = {
+            "com.google.android.permissioncontroller",   // 运行时权限弹窗
+            "com.android.vpndialogs",                    // VPN 连接同意
+    };
+
+    /** 提示条高度（px，与控件条/受保护提示条同口径：物理像素，不做 density 换算）。 */
+    private static final int POPUP_BAR_H = 56;
+    /** 提示条与顶部黑带的间距 / 左右留白（px）。 */
+    private static final int POPUP_BAR_TOP_GAP = 8;
+    private static final int POPUP_BAR_SIDE = 8;
+
+    /**
+     * 巡检线程。shell 往返（dumpsys 走 Shizuku/root）可能几百毫秒到数秒，
+     * 绝不能压在主线程上；单线程串行 + "跑完再排下一次"，天然不会堆积。
+     */
+    private HandlerThread mPopupThread;
+    private Handler mPopupHandler;
+    /** 回主线程改 View 用的 Handler（mBarWatchdog 可能为 null，单独持一份）。 */
+    private Handler mPopupUi;
+    private volatile boolean mPopupWatchOn = false;
+
+    /**
+     * v2.6.7：弹窗遮挡期间**暂停渲染**（抓帧线程每帧都会读，所以是 volatile）。
+     *
+     * <p>为什么：弹窗在时拿到的帧本身是坏的 —— 实测外屏上是"黑底一个巨大的绿色圆"
+     * （Clash 圆标被放大到整屏），另一次是纯黑。v2.6.3 起 onDraw 按"实际帧位图尺寸"
+     * 铺满画面区，继续 setBitmap 只会把这种异常帧放大成满屏垃圾（花屏）。
+     * 命中期间一帧都不画，画面留在 applyPopupBar 清成的纯深色底 + 顶部提示条；
+     * 弹窗消失（下一拍巡检变成 false）后置回 false，下一帧自然恢复，不做额外动画。
+     */
+    private volatile boolean mRenderPaused = false;
+
+    /** 提示条唯一实例：存在就只切可见性，绝不重复 addView（避免进出多次叠出多条）。 */
+    private android.widget.TextView mPopupBar;
+
+    /** 启动巡检（幂等：已在跑就直接返回）。由 onCreate 调用。 */
+    private void startPopupWatch() {
+        if (mPopupThread != null) {
+            return;
+        }
+        mPopupUi = new Handler(getMainLooper());
+        mPopupThread = new HandlerThread("popup-cover-watch");
+        mPopupThread.start();
+        mPopupHandler = new Handler(mPopupThread.getLooper());
+        mPopupWatchOn = true;
+        mPopupHandler.postDelayed(mPopupTick, POPUP_POLL_MS);
+        Log.i(TAG, "popup cover watch started");
+    }
+
+    /**
+     * 停巡检（服务销毁时调用）。
+     *
+     * <p>先置标记再摘消息再 quitSafely：正在跑的那一拍会自己看到 {@code mPopupWatchOn=false}
+     * 而不再续排，所以不会出现"服务停了巡检还在跑"。
+     */
+    private void stopPopupWatch() {
+        mPopupWatchOn = false;
+        mRenderPaused = false;   // 服务走了就别把渲染闸留在"暂停"上
+        Handler h = mPopupHandler;
+        mPopupHandler = null;
+        if (h != null) {
+            h.removeCallbacksAndMessages(null);
+        }
+        HandlerThread t = mPopupThread;
+        mPopupThread = null;
+        if (t != null) {
+            t.quitSafely();
+        }
+        mPopupUi = null;
+        Log.i(TAG, "popup cover watch stopped");
+    }
+
+    /** 一拍巡检（在 popup-cover-watch 线程上跑）。 */
+    private final Runnable mPopupTick = new Runnable() {
+        @Override
+        public void run() {
+            Handler h = mPopupHandler;
+            if (!mPopupWatchOn || h == null) {
+                return;
+            }
+            boolean covered = false;
+            try {
+                String host = detectPopupHostPkg();
+                covered = (host != null);
+                if (covered) {
+                    // v2.6.9：命中当拍就地自动点「允许」（内部自带指纹/次数闸）。
+                    autoAllowPopup(host);
+                } else {
+                    notePopupAbsent();
+                }
+            } catch (Throwable t) {
+                Log.w(TAG, "popup tick failed: " + t);
+            }
+            final boolean show = covered;
+            // 渲染闸先行：抓帧线程读的是 volatile，不依赖主线程排队，命中后下一帧就停画
+            final boolean changed = (show != mRenderPaused);
+            mRenderPaused = show;
+            Handler ui = mPopupUi;
+            if (ui != null) {
+                ui.post(() -> {
+                    applyPopupBar(show);
+                    // 刚进入遮挡：把手上那一帧（往往就是花屏帧）直接丢掉，
+                    // onDraw 只剩"整窗铺黑"，外屏不会停在垃圾画面上。
+                    if (show && changed && mView != null) {
+                        try {
+                            mView.clearBitmap();
+                        } catch (Throwable ignored) { }
+                    }
+                });
+            }
+            // "跑完再排"：shell 慢时不会把一拍叠成多拍
+            if (mPopupWatchOn) {
+                h.postDelayed(this, POPUP_POLL_MS);
+            }
+        }
+    };
+
+    /**
+     * 前台窗口是不是系统弹窗宿主包；命中返回包名，否则 null。
+     *
+     * <p>抑制条件与服务里其它巡检一致：正在退出 / 已隐藏 / 原生模式 / 搬屏途中都不判 ——
+     * 那些状态下没有"镜像全黑"这回事。返回 null（读不到）一律当"没遮挡"，
+     * 宁可漏提示也不能在正常画面盖上一条横条。
+     *
+     * <p>🔴 自动点击的唯一入口判据就是这里的返回值：只有 topResumedActivity 的包名
+     * **精确等于** {@link #POPUP_PKGS} 里的某一项才会走 autoAllowPopup()，
+     * 其它任何前台（设置、桌面、普通 App）都不会被注入 input。
+     */
+    private String detectPopupHostPkg() {
+        if (mShuttingDown || mHidden || sHidden || sNativeMode || mMovingToCover || mRoot == null) {
+            return null;
+        }
+        // 🔴 v2.6.7：折叠态下 mCurrentFocus / mFocusedApp **都是 null**（SM-F731N 实测），
+        //    原来那条 dumpsys window | grep mCurrentFocus 永远拿不到东西 → 提示条从来没出现过。
+        //    改读 activities 的 topResumedActivity：弹窗（GrantPermissionsActivity 等）在这里照样是 top。
+        //    输出尾部常带 "Failed to write while dumping service activity: Broken pipe"，
+        //    所以不按行/不按字段切，直接整段丢给正则找第一个 pkg/Activity，脏数据自然被忽略。
+        String out = Shell.execOut("dumpsys activity activities | grep -m1 topResumedActivity");
+        if (out == null) {
+            return null;
+        }
+        // 先挑出 topResumedActivity 那一行（Broken pipe 之类的脏行可能混在前面），
+        // 挑不到就退回整段找 —— 两头都不至于因为一行垃圾就漏判。
+        String pick = null;
+        for (String ln : out.split("\n")) {
+            if (ln.contains("topResumedActivity")) {
+                pick = ln;
+                break;
+            }
+        }
+        String comp = componentOf(pick != null ? pick : out);
+        if (comp == null) {
+            return null;   // topResumedActivity=null / 输出残缺 → 当"没遮挡"
+        }
+        String pkg = comp.substring(0, comp.indexOf('/'));
+        for (String p : POPUP_PKGS) {
+            if (p.equals(pkg)) {
+                Log.i(TAG, "popup covered by " + pkg + " (" + comp + ")");
+                return pkg;
+            }
+        }
+        return null;
+    }
+
+    /* ------------------------- 权限弹窗「自动允许」（v2.6.9） */
+
+    /**
+     * <p>🔴 背景（SM-F731N 实测）：这台机内屏已坏，用户只看外屏镜像。系统权限弹窗
+     * （permissioncontroller/GrantPermissionsActivity）只出现在 display 0，弹窗期间
+     * 系统禁止抓屏 → 外屏纯黑，用户既看不见也点不到，App 就卡在那儿。
+     * 所以命中 {@link #POPUP_PKGS} 后由 shell 侧 dump 一次 UI 层级，找到「允许」类
+     * 按钮就点它。
+     *
+     * <p>🔴 安全边界（改代码前先读这四条）：
+     * <ol>
+     *   <li>只在 {@link #detectPopupHostPkg()} 返回非 null（topResumedActivity 的包名
+     *       <b>精确等于</b> POPUP_PKGS 中的一项）时才动作，别的前台一律不碰；</li>
+     *   <li>必须当拍 dump 里<b>明确存在</b>「允许类按钮」才点，找不到就一拍都不点；</li>
+     *   <li>只按节点 bounds 中心点一次，不连点、不滑动、不点别的坐标；</li>
+     *   <li>每次动作都 Log.i 包名 + 按钮文本，便于事后审计（谁在什么时候点了什么）。</li>
+     * </ol>
+     */
+
+    /** dump 到 /sdcard 再 cat 回来：一条命令搞定，dump 自身把进度写 stdout 会污染 xml。 */
+    private static final String POPUP_DUMP_CMD =
+            "uiautomator dump /sdcard/gz_perm.xml >/dev/null 2>&1; cat /sdcard/gz_perm.xml";
+
+    /**
+     * 允许类按钮文案，按优先级从高到低逐个试。
+     *
+     * <p>匹配必须是**整串 equalsIgnoreCase**，绝不能用 contains —— 中文里
+     * "不允许"包含"允许"，一旦 contains 就会把拒绝当允许点掉，这是最坏的事故。
+     */
+    private static final String[] PERM_ALLOW_TEXTS = {
+            "允许", "Allow", "确定", "OK", "继续", "Continue", "同意", "同意并继续"
+    };
+
+    /** 同一个弹窗（指纹相同）最多点几次 —— 点满仍不消失就收手，防死循环/连点。 */
+    private static final int PERM_ALLOW_MAX_TRIES = 2;
+
+    private static final java.util.regex.Pattern RE_BOUNDS =
+            java.util.regex.Pattern.compile("bounds=\"\\[(\\d+),(\\d+)\\]\\[(\\d+),(\\d+)\\]\"");
+    private static final java.util.regex.Pattern RE_TEXT =
+            java.util.regex.Pattern.compile("text=\"([^\"]*)\"");
+    private static final java.util.regex.Pattern RE_DESC =
+            java.util.regex.Pattern.compile("content-desc=\"([^\"]*)\"");
+
+    /** 当拍 dump 里命中到的按钮中心点（物理像素，display 0 坐标系）+ 命中的文案。 */
+    private static final class PermTap {
+        final int x, y;
+        final String text;
+        PermTap(int x, int y, String text) { this.x = x; this.y = y; this.text = text; }
+    }
+
+    /* --- 自动允许的节流状态：只被 popup-cover-watch 单线程读写，无需加锁 --- */
+
+    /**
+     * 当前弹窗指纹 = {@code 包名#界面文本hash}。
+     *
+     * <p>用文本而不是时间/次数：同一个弹窗（如"允许 Clash 发送通知？"）反复 dump 出来
+     * 的文本串是稳定的，指纹因此稳定；换成另一个权限/另一个 App 的弹窗，文本变了，
+     * 指纹随之改变 —— 计数自动归零，重新给 2 次机会。
+     */
+    private String mPermFp;
+    /** 该指纹已经发出的 tap 次数。 */
+    private int mPermTries;
+    /** 该指纹已放弃（点满 2 次弹窗还在），不再发 tap。 */
+    private boolean mPermGaveUp;
+    /**
+     * 连续没命中弹窗的拍数。连续 {@link #PERM_QUIET_TICKS} 拍都没命中才清状态 ——
+     * 单拍 dumpsys 读空（Broken pipe / timeout）不该把计数清掉，否则会变成无限重试。
+     */
+    private int mPermQuietTicks;
+    private static final int PERM_QUIET_TICKS = 2;
+
+    /** 没命中弹窗时调用：连续静默够久就把指纹/计数复位，下次新弹窗从头算。 */
+    private void notePopupAbsent() {
+        if (mPermFp == null) {
+            return;
+        }
+        if (++mPermQuietTicks < PERM_QUIET_TICKS) {
+            return;
+        }
+        mPermFp = null;
+        mPermTries = 0;
+        mPermGaveUp = false;
+        mPermQuietTicks = 0;
+    }
+
+    /**
+     * 命中系统弹窗宿主包后自动点一次「允许」。
+     *
+     * <p>调用方已经保证 topResumedActivity 精确等于 POPUP_PKGS 中的包，这里只关心
+     * "当拍有没有明确的允许按钮"以及"这个弹窗是不是已经点过了"。
+     */
+    private void autoAllowPopup(String host) {
+        mPermQuietTicks = 0;
+        String xml = Shell.execOut(POPUP_DUMP_CMD);
+        if (xml == null || !xml.contains("<hierarchy")) {
+            // dump 失败（cat 报错、文件还没写完、被截断）：没有可信坐标，一拍都不点。
+            Log.w(TAG, "auto-allow: dump failed for " + host);
+            return;
+        }
+        String fp = host + "#" + dumpTextHash(xml);
+        if (!fp.equals(mPermFp)) {
+            mPermFp = fp;
+            mPermTries = 0;
+            mPermGaveUp = false;
+        }
+        if (mPermGaveUp) {
+            return;   // 这个弹窗已经点满 2 次还在，安静保持提示条，不再骚扰
+        }
+        if (mPermTries >= PERM_ALLOW_MAX_TRIES) {
+            mPermGaveUp = true;
+            Log.w(TAG, "auto-allow: give up after " + mPermTries
+                    + " taps, popup still there (" + host + ")");
+            return;
+        }
+        PermTap p = parsePermissionButton(xml, true);
+        if (p == null) {
+            // 弹窗上找不到任何允许类文案（或是"仅本次/仅使用时"这种非标准布局）：
+            // 绝不猜坐标，一拍都不点，保持提示条让用户自己处理。
+            Log.w(TAG, "auto-allow: no allow button found for " + host);
+            return;
+        }
+        mPermTries++;
+        Shell.execOut("input -d 0 tap " + p.x + " " + p.y);
+        Log.i(TAG, "auto-allow tap: " + host + " / " + p.text + " @" + p.x + "," + p.y
+                + " (try " + mPermTries + "/" + PERM_ALLOW_MAX_TRIES + ")");
+    }
+
+    /**
+     * 弹窗指纹用的文本摘要：把 dump 里所有节点的 text/content-desc 串起来取 hashCode。
+     *
+     * <p>故意不排序、不裁剪：同一界面 uiautomator 的输出顺序是稳定的，原样拼接即可；
+     * 换界面时哪怕只多一句提示文案，hash 也会变，正好用来区分"是不是同一个弹窗"。
+     */
+    private static String dumpTextHash(String xml) {
+        StringBuilder sb = new StringBuilder();
+        int i = 0;
+        while (true) {
+            int s = xml.indexOf("<node", i);
+            if (s < 0) break;
+            int e = xml.indexOf('>', s);
+            if (e < 0) break;
+            String tag = xml.substring(s, e);
+            i = e + 1;
+            String t = firstGroup(RE_TEXT, tag);
+            if (t != null && !t.isEmpty()) sb.append(t).append('\u0001');
+            String d = firstGroup(RE_DESC, tag);
+            if (d != null && !d.isEmpty()) sb.append(d).append('\u0001');
+        }
+        return Integer.toHexString(sb.toString().hashCode());
+    }
+
+    /**
+     * 从 dump xml 里找「允许」类按钮中心点，{@link #PERM_ALLOW_TEXTS} 按优先级逐个试。
+     *
+     * <p>只做**整串相等**匹配（忽略大小写），绝不用 contains —— 见 PERM_ALLOW_TEXTS 注释。
+     */
+    private static PermTap parsePermissionButton(String xml, boolean allow) {
+        if (xml == null) {
+            return null;
+        }
+        String[] wanted = PERM_ALLOW_TEXTS;
+        for (String w : wanted) {
+            int i = 0;
+            while (true) {
+                int s = xml.indexOf("<node", i);
+                if (s < 0) break;
+                int e = xml.indexOf('>', s);
+                if (e < 0) break;
+                String tag = xml.substring(s, e);
+                i = e + 1;
+                if (!nodeTextIs(tag, w)) continue;
+                java.util.regex.Matcher m = RE_BOUNDS.matcher(tag);
+                if (!m.find()) continue;
+                int l = Integer.parseInt(m.group(1));
+                int t = Integer.parseInt(m.group(2));
+                int r = Integer.parseInt(m.group(3));
+                int b = Integer.parseInt(m.group(4));
+                if (r <= l || b <= t) continue;
+                return new PermTap((l + r) / 2, (t + b) / 2, w);
+            }
+        }
+        return null;
+    }
+
+    /** 节点的 text 或 content-desc 是否等于给定文案（忽略大小写）。 */
+    private static boolean nodeTextIs(String tag, String wanted) {
+        String txt = firstGroup(RE_TEXT, tag);
+        if (txt != null && txt.trim().equalsIgnoreCase(wanted)) return true;
+        String desc = firstGroup(RE_DESC, tag);
+        return desc != null && desc.trim().equalsIgnoreCase(wanted);
+    }
+
+    private static String firstGroup(java.util.regex.Pattern p, String s) {
+        java.util.regex.Matcher m = p.matcher(s);
+        return m.find() ? m.group(1) : null;
+    }
+
+    /** 主线程：显示/隐藏提示条（同一个实例，只切可见性）。 */
+    private void applyPopupBar(boolean show) {
+        if (mShuttingDown) {
+            show = false;
+        }
+        if (!show) {
+            hidePopupBar();
+            return;
+        }
+        if (mRoot == null) {
+            return;
+        }
+        try {
+            if (mPopupBar == null) {
+                Context c = mDcCtx != null ? mDcCtx : this;
+
+                // 文案条本身不吃触摸：自身 onTouchEvent 恒 false，事件继续落到下面的画面层
+                //（与控件条/画面共享同一个悬浮窗，不能加窗口级 FLAG_NOT_TOUCHABLE，
+                // 那会把整个镜像窗口一起变成不可触 —— 所以按 View 级做到同等效果）。
+                // v2.6.9：弹窗改由 shell 自动点「允许」，条上不再放「允许 / 拒绝」按钮。
+                android.widget.TextView v = new android.widget.TextView(c) {
+                    @Override
+                    public boolean onTouchEvent(MotionEvent e) {
+                        return false;
+                    }
+                };
+                v.setText("检测到系统权限弹窗，正在自动允许…");
+                v.setTextColor(0xFFFFFFFF);
+                v.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, 18f);
+                v.setGravity(Gravity.CENTER);
+                v.setSingleLine(true);
+                v.setIncludeFontPadding(false);
+                android.graphics.drawable.GradientDrawable bg =
+                        new android.graphics.drawable.GradientDrawable();
+                bg.setColor(0xD9000000);          // 深色半透明底
+                bg.setCornerRadius(8f);
+                v.setBackground(bg);
+                v.setClickable(false);
+                v.setFocusable(false);
+
+                android.widget.FrameLayout.LayoutParams lp =
+                        new android.widget.FrameLayout.LayoutParams(
+                                android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                                POPUP_BAR_H, Gravity.TOP | Gravity.START);
+                lp.topMargin = TOP_BAND + POPUP_BAR_TOP_GAP;   // 贴顶部黑带下方
+                lp.leftMargin = POPUP_BAR_SIDE;
+                lp.rightMargin = POPUP_BAR_SIDE;
+                mRoot.addView(v, lp);
+                mPopupBar = v;
+                Log.i(TAG, "popup notice bar added");
+            }
+            if (mPopupBar.getVisibility() != View.VISIBLE) {
+                mPopupBar.setVisibility(View.VISIBLE);
+                Log.i(TAG, "popup notice bar shown");
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "applyPopupBar failed: " + t);
+        }
+    }
+
+    /** 收起提示条（保留实例，下次只切回来，避免反复 add/remove）。 */
+    private void hidePopupBar() {
+        View v = mPopupBar;
+        if (v == null || v.getVisibility() == View.GONE) {
+            return;
+        }
+        try {
+            v.setVisibility(View.GONE);
+            Log.i(TAG, "popup notice bar hidden");
+        } catch (Throwable ignored) { }
+    }
+
+    /** 真正摘掉提示条（服务销毁 / 窗口重建时用）。 */
+    private void detachPopupBar() {
+        try {
+            if (mPopupBar != null && mRoot != null) {
+                mRoot.removeView(mPopupBar);
+            }
+        } catch (Throwable ignored) { }
+        mPopupBar = null;
+    }
+
     /**
      * 「搬过去」：先 {@link #shutdown()}（与 ✕ 同一条隐藏路径），再让页面原生起在 display 1。
      * 失败必须 {@link #showAgain()} 回滚 —— 不能把用户留在黑屏。
@@ -2063,6 +2540,8 @@ public class CoverOverlayMirrorService extends Service {
         } catch (Throwable t) {
             Log.w(TAG, "hide failed: " + t);
         }
+        // 隐藏时把弹窗遮挡提示条一起收起：窗口只是 alpha=0，条留着会在 showAgain 后先闪一下
+        hidePopupBar();
         // 不 stopSelf、不 removeView —— 服务与窗口都留着，下次秒回
         // 隐藏后还要催一次 SubHome：它被全屏层盖住期间会停止绘制，
         // 只把层藏起来它不会自己重画（实测露出来还是壁纸）。发 HOME 让它恢复。
@@ -2152,6 +2631,9 @@ public class CoverOverlayMirrorService extends Service {
         mPrompt = null;
         mPromptComponent = null;
         mMovingToCover = false;
+        // v2.6.6：停掉系统弹窗巡检（不能服务没了线程还在跑），并把提示条从根容器摘掉
+        stopPopupWatch();
+        detachPopupBar();
         try {
             if (mWakeLock != null && mWakeLock.isHeld()) {
                 mWakeLock.release();
